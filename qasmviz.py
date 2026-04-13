@@ -682,7 +682,8 @@ def format_gate_counts(circuit) -> str:
 
 def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     rows: list[tuple[str, object]] = [
-        ("qubits", circuit.num_qubits),
+        ("width", circuit.num_qubits),
+        ("depth", circuit.depth()),
         ("gates", format_gate_counts(circuit)),
     ]
 
