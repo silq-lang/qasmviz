@@ -949,7 +949,7 @@ def main() -> None:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="output cost metrics as JSON instead of human-readable text.",
+        help="output cost metrics as JSON. with `--run`, outputs simulation results as JSON instead.",
     )
     parser.add_argument(
         "--dump",
@@ -990,6 +990,8 @@ def main() -> None:
         parser.error("--eps must be positive")
     if args.json and args.dump:
         parser.error("--json and --dump cannot be used together.")
+    if args.json and args.cost and args.run:
+        parser.error("--json, --cost and --run cannot all be used together.")
 
     # Collect (filename_or_None, qasm_code) pairs.
     if args.qasm_files:
@@ -1060,7 +1062,8 @@ def main() -> None:
         explicitly_selected_output = args.dump or args.run or args.cost or args.json
         do_dump = args.dump or (not explicitly_selected_output and not multiple)
         do_run = args.run
-        do_cost = (do_dump or args.cost or (multiple and not explicitly_selected_output)) and not args.no_cost
+        default_cost = do_dump or (multiple and not explicitly_selected_output)
+        do_cost = (args.cost or (default_cost and not args.run)) and not args.no_cost
         do_json = args.json
 
         need_blank = False
@@ -1083,37 +1086,43 @@ def main() -> None:
             print_costs(selected, **basis_kwargs)
             need_blank = True
 
-        if do_json:
-            costs = collect_costs(selected, **basis_kwargs)
-            if do_run:
-                clbits, values = run_circuit_and_capture(selected)
-                costs["clbits"] = format_clbits(clbits) or None
-                costs["statevector"] = [
-                    {"basis": basis, "re": val.real, "im": val.imag}
-                    for basis, val in values
-                ] if values else []
+        if do_json and not args.run:
+            result = collect_costs(selected, **basis_kwargs)
             if multiple:
-                costs["file"] = filename
-                json_results.append(costs)
+                result["file"] = filename
+                json_results.append(result)
             else:
                 import json
-                print(json.dumps(costs, indent=2))
+                print(json.dumps(result, indent=2))
 
-        if do_run and not do_json:
-            if need_blank:
-                print()
-
-            clbits, values = run_circuit_and_capture(selected)
-
-            clbit_str = format_clbits(clbits)
-            if clbit_str:
-                print(f"classical bits: {clbit_str}")
-
-            if values:
-                max_abs = max(abs(v) for _, v in values)
-                print_pretty_state(values, max_abs=max_abs)
+        if do_run:
+            if do_json:
+                clbits, values = run_circuit_and_capture(selected)
+                result = {
+                    "clbits": format_clbits(clbits) or None,
+                    "statevector": [
+                        {"basis": basis, "re": val.real, "im": val.imag}
+                        for basis, val in values
+                    ],
+                }
+                if multiple:
+                    result["file"] = filename
+                    json_results.append(result)
+                else:
+                    import json
+                    print(json.dumps(result, indent=2))
             else:
-                print("0")
+                if need_blank:
+                    print()
+                clbits, values = run_circuit_and_capture(selected)
+                clbit_str = format_clbits(clbits)
+                if clbit_str:
+                    print(f"classical bits: {clbit_str}")
+                if values:
+                    max_abs = max(abs(v) for _, v in values)
+                    print_pretty_state(values, max_abs=max_abs)
+                else:
+                    print("0")
 
     if json_results is not None:
         import json
