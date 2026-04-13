@@ -221,6 +221,195 @@ def cx_metrics(circuit) -> tuple[int, int]:
     )
     return count, depth
 
+def _iter_condition_clbits(cond):
+    """
+    Yield Clbit objects referenced by a Qiskit control-flow condition/target.
+
+    Supports the common forms:
+      - (Clbit, int)
+      - (ClassicalRegister, int)
+      - Clbit
+      - ClassicalRegister
+      - expr.Expr (via conservative recursive introspection)
+    """
+    from qiskit.circuit import Clbit, ClassicalRegister
+
+    seen = set()
+
+    def visit(obj):
+        if obj is None:
+            return
+
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+
+        if isinstance(obj, Clbit):
+            yield obj
+            return
+
+        if isinstance(obj, ClassicalRegister):
+            for bit in obj:
+                yield bit
+            return
+
+        if isinstance(obj, tuple) and len(obj) == 2:
+            lhs, _rhs = obj
+            yield from visit(lhs)
+            return
+
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            for item in obj:
+                yield from visit(item)
+            return
+
+        # Conservative expr-like traversal. Qiskit's runtime classical
+        # expressions are tree-structured; these names cover the common cases.
+        for attr in ("left", "right", "operand", "operands", "children", "target"):
+            if hasattr(obj, attr):
+                try:
+                    child = getattr(obj, attr)
+                except Exception:
+                    continue
+                yield from visit(child)
+
+    yield from visit(cond)
+
+
+def _block_has_quantum_effects(block) -> bool:
+    """
+    Return True if the block contains any quantum-affecting operation, including
+    nested control flow whose blocks have quantum effects.
+    """
+    from qiskit.circuit import ControlFlowOp
+
+    for instruction in block.data:
+        op = instruction.operation
+
+        # Ignore purely classical terminal-ish work.
+        if op.name in {"measure", "barrier"}:
+            continue
+
+        # Any op touching qubits is quantum-relevant.
+        if instruction.qubits:
+            return True
+
+        # Recurse into nested control flow.
+        if isinstance(op, ControlFlowOp):
+            for inner in op.blocks:
+                if _block_has_quantum_effects(inner):
+                    return True
+
+    return False
+
+
+def active_measurement_indices(circuit) -> set[int]:
+    """
+    Return top-level instruction indices of measurements whose results
+    influence later quantum execution through control flow.
+
+    Current semantics:
+      - only measurements that write clbits later consumed by If/While/Switch
+        conditions are considered
+      - a later overwrite kills the earlier measurement
+      - only control-flow ops whose blocks contain quantum effects count
+      - analysis is over top-level measurement definitions; nested blocks are
+        scanned for control uses, but measurements inside nested blocks are not
+        returned by this function
+    """
+    from qiskit.circuit import ControlFlowOp, IfElseOp, WhileLoopOp, SwitchCaseOp
+
+    data = list(circuit.data)
+    active: set[int] = set()
+
+    # Last top-level measurement that defined each clbit.
+    last_measure_def: dict[object, int] = {}
+
+    def process_block(block, reaching_defs):
+        current_defs = dict(reaching_defs)
+
+        for instruction in block.data:
+            op = instruction.operation
+
+            if op.name == "measure":
+                for cbit in instruction.clbits:
+                    current_defs[cbit] = -1  # nested measurement, not top-level
+                continue
+
+            if isinstance(op, (IfElseOp, WhileLoopOp)):
+                used = set(_iter_condition_clbits(op.condition))
+                if _block_has_quantum_effects(block) and used:
+                    for cbit in used:
+                        src = current_defs.get(cbit)
+                        if src is not None and src >= 0:
+                            active.add(src)
+
+                for inner in op.blocks:
+                    process_block(inner, current_defs)
+                continue
+
+            if isinstance(op, SwitchCaseOp):
+                used = set(_iter_condition_clbits(op.target))
+                if _block_has_quantum_effects(block) and used:
+                    for cbit in used:
+                        src = current_defs.get(cbit)
+                        if src is not None and src >= 0:
+                            active.add(src)
+
+                for inner in op.blocks:
+                    process_block(inner, current_defs)
+                continue
+
+            if isinstance(op, ControlFlowOp):
+                for inner in op.blocks:
+                    process_block(inner, current_defs)
+
+        return
+
+    # Top-level pass.
+    current_defs = dict(last_measure_def)
+    for i, instruction in enumerate(data):
+        op = instruction.operation
+
+        if op.name == "measure":
+            for cbit in instruction.clbits:
+                current_defs[cbit] = i
+            continue
+
+        if isinstance(op, (IfElseOp, WhileLoopOp)):
+            used = set(_iter_condition_clbits(op.condition))
+            if any(_block_has_quantum_effects(inner) for inner in op.blocks):
+                for cbit in used:
+                    src = current_defs.get(cbit)
+                    if src is not None and src >= 0:
+                        active.add(src)
+
+            for inner in op.blocks:
+                process_block(inner, current_defs)
+            continue
+
+        if isinstance(op, SwitchCaseOp):
+            used = set(_iter_condition_clbits(op.target))
+            if any(_block_has_quantum_effects(inner) for inner in op.blocks):
+                for cbit in used:
+                    src = current_defs.get(cbit)
+                    if src is not None and src >= 0:
+                        active.add(src)
+
+            for inner in op.blocks:
+                process_block(inner, current_defs)
+            continue
+
+        if isinstance(op, ControlFlowOp):
+            for inner in op.blocks:
+                process_block(inner, current_defs)
+
+    return active
+
+def mcm_count(circuit) -> int:
+    return len(active_measurement_indices(circuit))
+
 def format_gate_counts(circuit) -> str:
     counts = dict(circuit.count_ops())
 
@@ -276,6 +465,10 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
         if cxc:
             rows.append(("cx-count", cxc))
             rows.append(("cx-depth", cxd))
+
+    mcmc = mcm_count(circuit)
+    if mcmc:
+        rows.append(("mcm-count", mcmc))
 
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
