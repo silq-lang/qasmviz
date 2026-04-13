@@ -779,9 +779,27 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
         metric_rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
 
     mcmc, mcmd = mcm_metrics(circuit)
+
+    reset_dag = circuit_to_dag(circuit)
+    resets = sum(
+        1 for node in reset_dag.topological_op_nodes()
+        if node.op.name == "reset"
+        and any(
+            isinstance(s, DAGOpNode) and s.op.name != "reset"
+            for s in reset_dag.successors(node)
+        )
+    )
+
+    measurement_rows: list[tuple[str, object]] = []
     if mcmc:
-        metric_rows.append(("mcm-count", mcmc))
-        metric_rows.append(("mcm-depth", mcmd))
+        measurement_rows.append(("mcm-count", mcmc))
+        measurement_rows.append(("mcm-depth", mcmd))
+    if resets:
+        measurement_rows.append(("resets", resets))
+
+    if metric_rows and measurement_rows:
+        metric_rows.append(None)
+    metric_rows.extend(measurement_rows)
 
     all_rows = rows + ([None] + metric_rows if metric_rows else [])
     label_width = max(len(row[0]) for row in all_rows if row is not None)
@@ -912,7 +930,7 @@ def main() -> None:
     need_blank = False
 
     if do_dump:
-        print(selected.draw(fold=args.fold))
+        print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
         need_blank = True
 
     if do_cost:
