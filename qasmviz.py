@@ -263,6 +263,15 @@ def ecr_metrics(circuit) -> tuple[int, int]:
     return count, depth
 
 
+def sx_metrics(circuit) -> tuple[int, int]:
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=lambda node: node.op.name in {"sx", "sxdg"},
+        respect_barriers=True,
+    )
+    return count, depth
+
+
 def two_qubit_metrics(circuit) -> tuple[int, int]:
     """Return (count, depth) for all two-qubit gates."""
     depth, count = metric_depth_and_count(
@@ -721,7 +730,16 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     data: dict = {}
 
     data["width"] = circuit.num_qubits
-    data["depth"] = circuit.depth()
+
+    if physical:
+        # On physical IBM hardware, rz is a virtual gate (frame change, zero
+        # pulse cost) and should not contribute to circuit depth.
+        _VIRTUAL_GATES = {"rz", "p", "u1", "id"}
+        data["depth"] = circuit.depth(
+            filter_function=lambda instr: instr.operation.name not in _VIRTUAL_GATES
+        )
+    else:
+        data["depth"] = circuit.depth()
 
     gate_total, gate_breakdown = format_gate_counts(circuit)
     data["gates"] = {"total": gate_total, "breakdown": gate_breakdown}
@@ -760,7 +778,12 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
             data["2q-depth"] = tqd
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
-    if rc:
+    if physical:
+        sxc, sxd = sx_metrics(circuit)
+        if sxc:
+            data["sx-count"] = sxc
+            data["sx-depth"] = sxd
+    elif rc:
         rot: dict = {
             "count": rc,
             "depth": rd,
@@ -769,14 +792,13 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
                 for k, v in rbreakdown.items()
             },
         }
-        if not physical:
-            rot_t_count = sum(
-                n * cnt for n, cnt in rbreakdown.items()
-                if isinstance(n, int)
-            )
-            rot["t-count"] = rot_t_count
-            if t_cost_fully_known(circuit):
-                rot["t-depth"] = rt if rn_approx == 0 else None
+        rot_t_count = sum(
+            n * cnt for n, cnt in rbreakdown.items()
+            if isinstance(n, int)
+        )
+        rot["t-count"] = rot_t_count
+        if t_cost_fully_known(circuit):
+            rot["t-depth"] = rt if rn_approx == 0 else None
         data["rotations"] = rot
 
     mcmc, mcmd = mcm_metrics(circuit)
@@ -825,6 +847,9 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
     if "2q-count" in data:
         metric_rows.append(("2q-count", data["2q-count"]))
         metric_rows.append(("2q-depth", data["2q-depth"]))
+    if "sx-count" in data:
+        metric_rows.append(("sx-count", data["sx-count"]))
+        metric_rows.append(("sx-depth", data["sx-depth"]))
 
     if "rotations" in data:
         rot = data["rotations"]
