@@ -960,6 +960,11 @@ def main() -> None:
         help="visualize the selected circuit.",
     )
     parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="dump the selected circuit as OpenQASM 3.",
+    )
+    parser.add_argument(
         "--run",
         action="store_true",
         help="simulate the selected circuit with qblaze and print classical bits and final sparse state.",
@@ -993,6 +998,8 @@ def main() -> None:
         parser.error("--eps must be positive")
     if args.json and args.show:
         parser.error("--json and --show cannot be used together.")
+    if args.json and args.dump:
+        parser.error("--json and --dump cannot be used together.")
     if args.json and args.cost and args.run:
         parser.error("--json, --cost and --run cannot all be used together.")
 
@@ -1062,8 +1069,9 @@ def main() -> None:
             selected = qc
 
         # With multiple files, default to --cost rather than --show.
-        explicitly_selected_output = args.show or args.run or args.cost or args.json
+        explicitly_selected_output = args.show or args.dump or args.run or args.cost or args.json
         do_show = args.show or (not explicitly_selected_output and not multiple)
+        do_dump = args.dump
         do_run = args.run
         default_cost = do_show or (multiple and not explicitly_selected_output)
         do_cost = (args.cost or (default_cost and not args.run)) and not args.no_cost
@@ -1081,6 +1089,13 @@ def main() -> None:
             if need_blank:
                 print()
             print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
+            need_blank = True
+
+        if do_dump:
+            from qiskit import qasm3
+            if need_blank:
+                print()
+            print(qasm3.dumps(selected))
             need_blank = True
 
         if do_cost:
