@@ -22,6 +22,8 @@ import qblaze.qiskit
 
 CLIFFORD_T_BASIS = ["cx", "h", "s", "sdg", "t", "tdg"]
 CX_1Q_BASIS = ["cx", "u"]
+IBM_BASIS = ["rz", "sx", "cx"]
+IBM_ECR_BASIS = ["rz", "sx", "ecr"]
 
 
 def arg_norm(x: float) -> float:
@@ -252,7 +254,15 @@ def has_many_qubit_gates(circuit) -> bool:
     )
 
 
-def two_qubit_metrics(circuit) -> tuple[int, int]:
+def ecr_metrics(circuit) -> tuple[int, int]:
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=lambda node: node.op.name == "ecr",
+        respect_barriers=True,
+    )
+    return count, depth
+
+
     """Return (count, depth) for all two-qubit gates."""
     depth, count = metric_depth_and_count(
         circuit,
@@ -717,7 +727,7 @@ def format_gate_counts(circuit) -> tuple[int, str]:
     breakdown = ", ".join(f"{name}={count}" for name, count in items)
     return total, breakdown
 
-def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
+def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> None:
     gate_total, gate_breakdown = format_gate_counts(circuit)
     rows: list[tuple[str, object] | None] = [
         ("width", circuit.num_qubits),
@@ -742,13 +752,18 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     #   - if any 3+-qubit gates are present, two-qubit metrics are incomplete
     #     and neither CX nor 2q metrics are reported (unless basis-translated)
     twoq_names = two_qubit_gate_names(circuit)
-    if clifford_t or cx1q:
+    if clifford_t or cx1q or ibm:
         # After basis translation these modes guarantee only CX as the
         # two-qubit gate, so CX metrics are always the right choice.
         cxc, cxd = cx_metrics(circuit)
         if cxc:
             metric_rows.append(("cx-count", cxc))
             metric_rows.append(("cx-depth", cxd))
+    elif ibm_ecr:
+        ecrc, ecrd = ecr_metrics(circuit)
+        if ecrc:
+            metric_rows.append(("ecr-count", ecrc))
+            metric_rows.append(("ecr-depth", ecrd))
     elif has_many_qubit_gates(circuit):
         pass  # 2q metrics would be incomplete; omit entirely
     elif twoq_names == {"cx"}:
@@ -812,56 +827,76 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Read OpenQASM 3 from a file or stdin, optionally dump the selected circuit, print costs, and/or run it with qblaze."
+        description="read OpenQASM 3 from a file or stdin, optionally dump the selected circuit, print costs, and/or run it with qblaze."
     )
     parser.add_argument(
         "qasm_file",
         nargs="?",
-        help="Optional .qasm file to read. Reads from stdin if omitted.",
+        help="optional `.qasm` file to read. reads `stdin` if omitted.",
     )
 
     compile_group = parser.add_mutually_exclusive_group()
     compile_group.add_argument(
-        "--fez",
+        "--cx1q",
         action="store_true",
-        help="Transpile for FakeFez and use the execution-ready circuit.",
+        help="transpile into the basis {cx, u}.",
     )
     compile_group.add_argument(
         "--clifford-t",
         action="store_true",
         dest="clifford_t",
-        help="Transpile into the Clifford+T basis {cx, h, s, sdg, t, tdg}.",
+        help="transpile into the Clifford+T basis {cx, h, s, sdg, t, tdg}.",
     )
     compile_group.add_argument(
-        "--cx1q",
+        "--ibm",
         action="store_true",
-        help="Transpile into the basis {cx, u}.",
+        help="transpile into the IBM basis {rz, sx, cx}.",
+    )
+    compile_group.add_argument(
+        "--ibm-ecr",
+        action="store_true",
+        dest="ibm_ecr",
+        help="transpile into the IBM Heron basis {rz, sx, ecr}.",
+    )
+    compile_group.add_argument(
+        "--fez",
+        action="store_true",
+        help="transpile for FakeFez and use the execution-ready circuit.",
+    )
+
+    parser.add_argument(
+        "--opt",
+        type=int,
+        default=3,
+        choices=[0, 1, 2, 3],
+        dest="opt_level",
+        help="transpiler optimization level (default: 3).",
     )
 
     parser.add_argument(
         "--eps",
         type=float,
-        help="Maximum allowed approximation error for Clifford+T synthesis. Requires --clifford-t.",
+        help="maximum allowed approximation error for Clifford+T synthesis. requires `--clifford-t`.",
     )
     parser.add_argument(
         "--dump",
         action="store_true",
-        help="Print the selected circuit.",
+        help="print the selected circuit.",
     )
     parser.add_argument(
         "--run",
         action="store_true",
-        help="Simulate the selected circuit with qblaze and print classical bits and final sparse state.",
+        help="simulate the selected circuit with qblaze and print classical bits and final sparse state.",
     )
     parser.add_argument(
         "--cost",
         action="store_true",
-        help="Print operation counts even when not dumping the circuit.",
+        help="print operation counts even when not dumping the circuit.",
     )
     parser.add_argument(
         "--no-cost",
         action="store_true",
-        help="Do not print operation counts, including after --dump.",
+        help="do not print operation counts, including after `--dump`.",
     )
     parser.add_argument(
         "--fold",
@@ -870,8 +905,8 @@ def main() -> None:
         const=None,
         default=-1,
         help=(
-            "Circuit draw fold width. Default: -1 (no folding). "
-            "Use bare --fold for automatic width detection."
+            "circuit draw fold width. default: `-1` (no folding). "
+            "use `--fold` for automatic width detection."
         ),
     )
     args = parser.parse_args()
@@ -895,14 +930,14 @@ def main() -> None:
     if args.fez:
         backend = FakeFez()
         pm = generate_preset_pass_manager(
-            optimization_level=3,
+            optimization_level=args.opt_level,
             backend=backend,
             seed_transpiler=777,
         )
         selected = pm.run(qc)
     elif args.clifford_t:
         pm_kwargs = dict(
-            optimization_level=3,
+            optimization_level=args.opt_level,
             basis_gates=CLIFFORD_T_BASIS,
             seed_transpiler=777,
         )
@@ -913,8 +948,22 @@ def main() -> None:
         selected = pm.run(qc)
     elif args.cx1q:
         pm = generate_preset_pass_manager(
-            optimization_level=3,
+            optimization_level=args.opt_level,
             basis_gates=CX_1Q_BASIS,
+            seed_transpiler=777,
+        )
+        selected = pm.run(qc)
+    elif args.ibm:
+        pm = generate_preset_pass_manager(
+            optimization_level=args.opt_level,
+            basis_gates=IBM_BASIS,
+            seed_transpiler=777,
+        )
+        selected = pm.run(qc)
+    elif args.ibm_ecr:
+        pm = generate_preset_pass_manager(
+            optimization_level=args.opt_level,
+            basis_gates=IBM_ECR_BASIS,
             seed_transpiler=777,
         )
         selected = pm.run(qc)
@@ -936,7 +985,7 @@ def main() -> None:
     if do_cost:
         if need_blank:
             print()
-        print_costs(selected, clifford_t=args.clifford_t, cx1q=args.cx1q)
+        print_costs(selected, clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr)
         need_blank = True
 
     if do_run:
