@@ -263,6 +263,7 @@ def ecr_metrics(circuit) -> tuple[int, int]:
     return count, depth
 
 
+def two_qubit_metrics(circuit) -> tuple[int, int]:
     """Return (count, depth) for all two-qubit gates."""
     depth, count = metric_depth_and_count(
         circuit,
