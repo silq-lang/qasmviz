@@ -905,9 +905,6 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
 
     metric_rows: list[tuple[str, object] | None] = []
 
-    if "t-count" in data:
-        metric_rows.append(("t-count", data["t-count"]))
-        metric_rows.append(("t-depth", data["t-depth"]))
     if "cx-count" in data:
         metric_rows.append(("cx-count", data["cx-count"]))
         metric_rows.append(("cx-depth", data["cx-depth"]))
@@ -920,6 +917,9 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
     if "sx-count" in data:
         metric_rows.append(("sx-count", data["sx-count"]))
         metric_rows.append(("sx-depth", data["sx-depth"]))
+    if "t-count" in data:
+        metric_rows.append(("t-count", data["t-count"]))
+        metric_rows.append(("t-depth", data["t-depth"]))
 
     if "rotations" in data:
         rot = data["rotations"]
