@@ -897,7 +897,7 @@ def format_rotation_breakdown(breakdown: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="read OpenQASM 3 from a file or stdin, optionally dump the selected circuit, print costs, and/or run it with qblaze."
+        description="read OpenQASM 3 from a file or stdin, optionally visualize the selected circuit, print costs, and/or run it with qblaze."
     )
     parser.add_argument(
         "qasm_files",
@@ -955,9 +955,9 @@ def main() -> None:
         help="output cost metrics as JSON. with `--run`, outputs simulation results as JSON instead.",
     )
     parser.add_argument(
-        "--dump",
+        "--show",
         action="store_true",
-        help="print the selected circuit.",
+        help="visualize the selected circuit.",
     )
     parser.add_argument(
         "--run",
@@ -967,12 +967,12 @@ def main() -> None:
     parser.add_argument(
         "--cost",
         action="store_true",
-        help="print operation counts even when not dumping the circuit.",
+        help="print operation counts even when not visualizing the circuit.",
     )
     parser.add_argument(
         "--no-cost",
         action="store_true",
-        help="do not print operation counts, including after `--dump`.",
+        help="do not print operation counts, including after `--show`.",
     )
     parser.add_argument(
         "--fold",
@@ -991,8 +991,8 @@ def main() -> None:
         parser.error("--eps requires --clifford-t")
     if args.eps is not None and args.eps <= 0:
         parser.error("--eps must be positive")
-    if args.json and args.dump:
-        parser.error("--json and --dump cannot be used together.")
+    if args.json and args.show:
+        parser.error("--json and --show cannot be used together.")
     if args.json and args.cost and args.run:
         parser.error("--json, --cost and --run cannot all be used together.")
 
@@ -1061,11 +1061,11 @@ def main() -> None:
         else:
             selected = qc
 
-        # With multiple files, default to --cost rather than --dump.
-        explicitly_selected_output = args.dump or args.run or args.cost or args.json
-        do_dump = args.dump or (not explicitly_selected_output and not multiple)
+        # With multiple files, default to --cost rather than --show.
+        explicitly_selected_output = args.show or args.run or args.cost or args.json
+        do_show = args.show or (not explicitly_selected_output and not multiple)
         do_run = args.run
-        default_cost = do_dump or (multiple and not explicitly_selected_output)
+        default_cost = do_show or (multiple and not explicitly_selected_output)
         do_cost = (args.cost or (default_cost and not args.run)) and not args.no_cost
         do_json = args.json
 
@@ -1077,7 +1077,7 @@ def main() -> None:
             print(f"### {filename}")
             need_blank = True
 
-        if do_dump:
+        if do_show:
             if need_blank:
                 print()
             print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
