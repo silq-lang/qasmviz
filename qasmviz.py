@@ -669,50 +669,68 @@ def mcm_depth(circuit) -> int:
     _count, depth = mcm_metrics(circuit)
     return depth
 
-def format_gate_counts(circuit) -> tuple[int, str]:
+def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
     """
-    Return (total, breakdown_str) where total is the total gate count and
-    breakdown_str is the per-type breakdown in preferred order, e.g.
-    ``"h=3, p=1, ccx=4"``.
+    Return (display_total, breakdown_str).
+
+    In normal mode: total is all gates, breakdown groups ops/measures/barriers
+    at the back separated by ';'.
+
+    In physical mode: display_total is physical-only count shown as 'N[+V]'
+    where V is virtual gate count, and breakdown has three sections:
+    'physical; reset/measure; virtual'.
     """
     counts = dict(circuit.count_ops())
 
+    _MEASURE_OPS = {"reset", "measure", "barrier"}
+    _VIRTUAL_GATE_NAMES = {"rz", "p", "u1", "id"} if physical else set()
+
     preferred_order = [
-        "cx",
-        "cz",
-        "swap",
-        "h",
-        "s",
-        "sdg",
-        "t",
-        "tdg",
-        "x",
-        "y",
-        "z",
-        "sx",
-        "sxdg",
-        "rx",
-        "ry",
-        "rz",
-        "p",
-        "u",
-        "u1",
-        "u2",
-        "u3",
-        "id",
-        "reset",
-        "measure",
-        "barrier",
+        "cx", "ecr", "cz", "swap",
+        "h", "s", "sdg", "t", "tdg",
+        "x", "y", "z", "sx", "sxdg",
+        "rx", "ry", "rz", "p", "u", "u1", "u2", "u3", "id",
     ]
     rank = {name: i for i, name in enumerate(preferred_order)}
 
-    items = sorted(
-        counts.items(),
-        key=lambda kv: (rank.get(kv[0], len(preferred_order)), kv[0]),
+    def fmt(items):
+        return ", ".join(f"{name}={count}" for name, count in items)
+
+    def sort_key(kv):
+        return (rank.get(kv[0], len(preferred_order)), kv[0])
+
+    gate_items = sorted(
+        [(k, v) for k, v in counts.items()
+         if k not in _MEASURE_OPS and k not in _VIRTUAL_GATE_NAMES],
+        key=sort_key,
     )
-    total = sum(c for _, c in items)
-    breakdown = ", ".join(f"{name}={count}" for name, count in items)
-    return total, breakdown
+    measure_items = sorted(
+        [(k, v) for k, v in counts.items() if k in _MEASURE_OPS],
+        key=sort_key,
+    )
+    virtual_items = sorted(
+        [(k, v) for k, v in counts.items() if k in _VIRTUAL_GATE_NAMES],
+        key=sort_key,
+    )
+
+    sections = [fmt(gate_items)]
+    if measure_items:
+        sections.append(fmt(measure_items))
+    if virtual_items:
+        sections.append(fmt(virtual_items))
+    breakdown = "; ".join(s for s in sections if s)
+
+    physical_count = sum(v for k, v in counts.items()
+                         if k not in _MEASURE_OPS and k not in _VIRTUAL_GATE_NAMES)
+    virtual_count = sum(v for k, v in virtual_items)
+    total = sum(counts.values())
+
+    if physical and virtual_count:
+        display_total = f"{physical_count}[+{virtual_count}]"
+    else:
+        display_total = str(total)
+
+    return display_total, breakdown
 
 def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool, fez: bool) -> dict:
     """
@@ -741,8 +759,45 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     else:
         data["depth"] = circuit.depth()
 
-    gate_total, gate_breakdown = format_gate_counts(circuit)
-    data["gates"] = {"total": gate_total, "breakdown": gate_breakdown}
+    gate_display_total, gate_breakdown = format_gate_counts(circuit, physical=physical)
+    gate_counts = dict(circuit.count_ops())
+    _MEASURE_OPS_SET = {"reset", "measure", "barrier"}
+    _VIRTUAL_SET = {"rz", "p", "u1", "id"} if physical else set()
+
+    def _sorted_gate_dict(predicate):
+        preferred = [
+            "cx", "ecr", "cz", "swap", "h", "s", "sdg", "t", "tdg",
+            "x", "y", "z", "sx", "sxdg", "rx", "ry", "rz", "p",
+            "u", "u1", "u2", "u3", "id",
+        ]
+        rank = {name: i for i, name in enumerate(preferred)}
+        items = sorted(
+            [(k, v) for k, v in gate_counts.items() if predicate(k)],
+            key=lambda kv: (rank.get(kv[0], len(preferred)), kv[0]),
+        )
+        return dict(items)
+
+    gates_dict = _sorted_gate_dict(
+        lambda k: k not in _MEASURE_OPS_SET and k not in _VIRTUAL_SET
+    )
+    measure_dict = _sorted_gate_dict(lambda k: k in _MEASURE_OPS_SET)
+    virtual_dict = _sorted_gate_dict(lambda k: k in _VIRTUAL_SET)
+
+    total_count = sum(gate_counts.values())
+    physical_count = sum(gates_dict.values())
+    virtual_count = sum(virtual_dict.values())
+
+    data["gates"] = {
+        "display_count": gate_display_total,
+        "total_count": total_count,
+        "breakdown": gate_breakdown,
+        "gates": gates_dict,
+        "ops": measure_dict,
+    }
+    if physical:
+        data["gates"]["physical_count"] = physical_count
+        data["gates"]["virtual_count"] = virtual_count
+        data["gates"]["virtual"] = virtual_dict
 
     if circuit.num_clbits:
         data["clbits"] = circuit.num_clbits
@@ -828,7 +883,7 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
         ("depth", data["depth"]),
-        ("gates", f"{data['gates']['total']}  ({data['gates']['breakdown']})"),
+        ("gates", f"{data['gates']['display_count']}  ({data['gates']['breakdown']})"),
     ]
     if "clbits" in data:
         rows.append(("clbits", data["clbits"]))
