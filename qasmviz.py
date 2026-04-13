@@ -726,13 +726,14 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     ]
     if circuit.num_clbits:
         rows.append(("clbits", circuit.num_clbits))
-    rows.append(None)  # blank separator
+
+    metric_rows: list[tuple[str, object]] = []
 
     if clifford_t:
         tc, td = t_metrics(circuit)
         if tc:
-            rows.append(("t-count", tc))
-            rows.append(("t-depth", td))
+            metric_rows.append(("t-count", tc))
+            metric_rows.append(("t-depth", td))
 
     # Report CX-count/depth or two-qubit-count/depth, but not both:
     #   - if CX is the only two-qubit gate present, CX metrics are sufficient
@@ -746,20 +747,20 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
         # two-qubit gate, so CX metrics are always the right choice.
         cxc, cxd = cx_metrics(circuit)
         if cxc:
-            rows.append(("cx-count", cxc))
-            rows.append(("cx-depth", cxd))
+            metric_rows.append(("cx-count", cxc))
+            metric_rows.append(("cx-depth", cxd))
     elif has_many_qubit_gates(circuit):
         pass  # 2q metrics would be incomplete; omit entirely
     elif twoq_names == {"cx"}:
         cxc, cxd = cx_metrics(circuit)
         if cxc:
-            rows.append(("cx-count", cxc))
-            rows.append(("cx-depth", cxd))
+            metric_rows.append(("cx-count", cxc))
+            metric_rows.append(("cx-depth", cxd))
     elif twoq_names:
         tqc, tqd = two_qubit_metrics(circuit)
         if tqc:
-            rows.append(("2q-count", tqc))
-            rows.append(("2q-depth", tqd))
+            metric_rows.append(("2q-count", tqc))
+            metric_rows.append(("2q-depth", tqd))
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
     if rc:
@@ -768,22 +769,23 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
             if isinstance(n, int)
         )
         rot_count_str = f"{rc}  (T-count: {t_count}{format_rotation_breakdown(rbreakdown)})"
-        rows.append(("rot-count", rot_count_str))
+        metric_rows.append(("rot-count", rot_count_str))
         if t_cost_fully_known(circuit) and rn_approx == 0 and rt > 0:
             t_depth_annotation = f"  (T-depth: {rt})"
         elif t_cost_fully_known(circuit) and rn_approx > 0:
             t_depth_annotation = "  (T-depth: n/a)"
         else:
             t_depth_annotation = ""
-        rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
+        metric_rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
 
     mcmc, mcmd = mcm_metrics(circuit)
     if mcmc:
-        rows.append(("mcm-count", mcmc))
-        rows.append(("mcm-depth", mcmd))
+        metric_rows.append(("mcm-count", mcmc))
+        metric_rows.append(("mcm-depth", mcmd))
 
-    label_width = max(len(row[0]) for row in rows if row is not None)
-    for row in rows:
+    all_rows = rows + ([None] + metric_rows if metric_rows else [])
+    label_width = max(len(row[0]) for row in all_rows if row is not None)
+    for row in all_rows:
         if row is None:
             print()
         else:
