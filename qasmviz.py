@@ -705,7 +705,7 @@ def format_gate_counts(circuit) -> tuple[int, str]:
     breakdown = ", ".join(f"{name}={count}" for name, count in items)
     return total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool, fez: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -714,6 +714,10 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     Keys present depend on the circuit; absent metrics are not included.
     Structured sub-fields (e.g. rotation breakdown) are nested dicts.
     """
+    # Physical execution modes target real hardware gate sets where T-count
+    # and fault-tolerant metrics are not meaningful.
+    physical = ibm or ibm_ecr or fez
+
     data: dict = {}
 
     data["width"] = circuit.num_qubits
@@ -757,21 +761,22 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
     if rc:
-        rot_t_count = sum(
-            n * cnt for n, cnt in rbreakdown.items()
-            if isinstance(n, int)
-        )
         rot: dict = {
             "count": rc,
             "depth": rd,
-            "t-count": rot_t_count,
             "breakdown": {
                 (str(k) if k is not None else "approx"): v
                 for k, v in rbreakdown.items()
             },
         }
-        if t_cost_fully_known(circuit):
-            rot["t-depth"] = rt if rn_approx == 0 else None
+        if not physical:
+            rot_t_count = sum(
+                n * cnt for n, cnt in rbreakdown.items()
+                if isinstance(n, int)
+            )
+            rot["t-count"] = rot_t_count
+            if t_cost_fully_known(circuit):
+                rot["t-depth"] = rt if rn_approx == 0 else None
         data["rotations"] = rot
 
     mcmc, mcmd = mcm_metrics(circuit)
@@ -795,8 +800,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx1q=cx1q, ibm=ibm, ibm_ecr=ibm_ecr)
+def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool, fez: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx1q=cx1q, ibm=ibm, ibm_ecr=ibm_ecr, fez=fez)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -823,12 +828,15 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
 
     if "rotations" in data:
         rot = data["rotations"]
-        n_approx = rot["breakdown"].get("approx", 0)
-        t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
-        rot_count_str = (
-            f"{rot['count']}  "
-            f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
-        )
+        if "t-count" in rot:
+            n_approx = rot["breakdown"].get("approx", 0)
+            t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
+            rot_count_str = (
+                f"{rot['count']}  "
+                f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
+            )
+        else:
+            rot_count_str = str(rot['count'])
         metric_rows.append(("rot-count", rot_count_str))
         if "t-depth" in rot:
             if rot["t-depth"] is None:
@@ -1014,7 +1022,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr, fez=args.fez)
 
     json_results = [] if args.json and multiple else None
 
