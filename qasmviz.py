@@ -823,9 +823,11 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
 
     if "rotations" in data:
         rot = data["rotations"]
+        n_approx = rot["breakdown"].get("approx", 0)
+        t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
         rot_count_str = (
             f"{rot['count']}  "
-            f"(T-count: {rot['t-count']}{format_rotation_breakdown(rot['breakdown'])})"
+            f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
         )
         metric_rows.append(("rot-count", rot_count_str))
         if "t-depth" in rot:
