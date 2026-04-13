@@ -164,20 +164,25 @@ def metric_depth_and_count(
     circuit,
     *,
     is_interesting: Callable[[DAGOpNode], bool],
+    node_weight: Callable[[DAGOpNode], int] | None = None,
     respect_barriers: bool = True,
+    dag=None,
 ) -> tuple[int, int]:
     """
     Dependency-aware metric depth/count on the circuit DAG.
 
     The metric depth is the length of the longest dependency-respecting path,
     counting:
-      - 1 for each interesting node
+      - ``node_weight(node)`` for each interesting node (default: 1)
       - additionally 1 for each barrier node if respect_barriers=True
 
     Non-interesting, non-barrier nodes propagate the current metric layer
     without increasing it.
+
+    An already-built DAG may be supplied via ``dag`` to avoid rebuilding it.
     """
-    dag = circuit_to_dag(circuit)
+    if dag is None:
+        dag = circuit_to_dag(circuit)
 
     level: dict[int, int] = {}
     count = 0
@@ -194,7 +199,8 @@ def metric_depth_and_count(
         is_barrier = respect_barriers and node.op.name == "barrier"
         interesting = is_interesting(node)
 
-        here = base + (1 if interesting or is_barrier else 0)
+        weight = (node_weight(node) if node_weight else 1) if interesting else 0
+        here = base + (weight if interesting else (1 if is_barrier else 0))
         level[node._node_id] = here
 
         if interesting:
@@ -220,6 +226,187 @@ def cx_metrics(circuit) -> tuple[int, int]:
         respect_barriers=True,
     )
     return count, depth
+
+
+# Gates that are not themselves interesting as "two-qubit entangling" ops for
+# cost purposes: classical bookkeeping, barriers, and measurements.
+_NON_GATE_OPS = {"barrier", "measure", "reset", "delay", "snapshot"}
+
+
+def two_qubit_gate_names(circuit) -> set[str]:
+    """Return the set of distinct two-qubit gate names present in the circuit."""
+    names: set[str] = set()
+    for instr in circuit.data:
+        op = instr.operation
+        if op.name not in _NON_GATE_OPS and op.num_qubits == 2:
+            names.add(op.name)
+    return names
+
+
+def has_many_qubit_gates(circuit) -> bool:
+    """Return True if the circuit contains any gate acting on 3 or more qubits."""
+    return any(
+        instr.operation.num_qubits >= 3
+        for instr in circuit.data
+        if instr.operation.name not in _NON_GATE_OPS
+    )
+
+
+def two_qubit_metrics(circuit) -> tuple[int, int]:
+    """Return (count, depth) for all two-qubit gates."""
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=lambda node: (
+            node.op.name not in _NON_GATE_OPS and node.op.num_qubits == 2
+        ),
+        respect_barriers=True,
+    )
+    return count, depth
+
+
+# Single-qubit gates with a free continuous angle parameter — the gates that
+# drive Clifford+T / gridsynth synthesis cost.
+_ROTATION_GATES = {"rx", "ry", "rz", "p", "u1", "u2", "u3", "u"}
+
+
+def _dyadic_t_cost(angle: float) -> int | None:
+    """
+    Return the exact T-count required to synthesize a rotation by ``angle``
+    radians, or None if the angle is not a dyadic rational multiple of π.
+
+    A rotation by kπ/2^n (in lowest terms, k odd, n ≥ 0) costs max(0, n-1)
+    T-gates:
+      - n=0: multiple of π      → identity or Z/X up to Clifford → 0
+      - n=1: multiple of π/2    → S/Sdg or X/Y up to Clifford   → 0
+      - n=2: multiple of π/4    → T/Tdg up to Clifford           → 1
+      - n=k: multiple of π/2^k                                   → k-1
+
+    Returns None for angles that are not dyadic rational multiples of π
+    (i.e. require approximate synthesis).
+    """
+    # Normalise to [0, 2π).
+    turns = (angle / math.pi) % 2.0   # angle in units of π, mod 2
+
+    # Check if turns is close to a dyadic rational k/2^n for increasing n.
+    MAX_N = 20
+    for n in range(MAX_N + 1):
+        denom = 2 ** n
+        k = round(turns * denom)
+        if abs(turns - k / denom) < 1e-9:
+            # Reduce k/2^n to lowest terms by cancelling common factors of 2.
+            while n > 0 and k % 2 == 0:
+                k //= 2
+                n -= 1
+            # n is now the 2-adic order of the denominator in lowest terms.
+            # Clifford gates correspond to n ≤ 1 (multiples of π/2).
+            return max(0, n - 1)
+    return None  # not a dyadic rational multiple of π
+
+
+def _gate_t_cost(op) -> int | None:
+    """
+    Return the T-cost of a rotation gate operation.
+
+    For gates with multiple angle parameters (u, u2, u3), the cost is the
+    maximum over all parameters, since each non-Clifford parameter requires
+    independent synthesis but they can be parallelised.
+
+    Returns None if any parameter requires approximate synthesis.
+    """
+    costs = []
+    for param in op.params:
+        try:
+            angle = float(param)
+        except (TypeError, Exception):
+            return None  # symbolic parameter — can't determine statically
+        c = _dyadic_t_cost(angle)
+        if c is None:
+            return None
+        costs.append(c)
+    return max(costs, default=0)
+
+
+def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]]:
+    """
+    Return (count, depth, t_depth, n_approx, breakdown) for arbitrary-angle
+    single-qubit rotation gates.
+
+    ``t_depth`` is the weighted depth counting only the dyadic-rotation
+    contribution (each gate weighted by its exact T-cost).  Approximate
+    rotations contribute 0 to this number.
+
+    ``n_approx`` is the number of approximate rotations (non-dyadic angles).
+    The full T-depth is ``t_depth + n_approx·(synthesis cost per gate)``;
+    since the per-gate cost depends on the target precision, we report the
+    two parts separately.
+
+    ``breakdown`` maps T-cost → number of rotation gates with that cost:
+      - 0      : Clifford rotations (angle is a multiple of π/2)
+      - 1      : T-gates (π/4)
+      - n > 1  : dyadic rotations requiring n T-gates (angle kπ/2^n)
+      - None   : approximate rotations (non-dyadic angle)
+    """
+    breakdown: dict[int | None, int] = {}
+    t_costs: dict[int, int] = {}   # node_id -> T-cost (approx nodes absent)
+
+    def is_rotation_collect(node: DAGOpNode) -> bool:
+        if node.op.name not in _ROTATION_GATES:
+            return False
+        cost = _gate_t_cost(node.op)
+        breakdown[cost] = breakdown.get(cost, 0) + 1
+        if cost is not None:
+            t_costs[node._node_id] = cost
+        return True
+
+    def is_rotation(node: DAGOpNode) -> bool:
+        return node.op.name in _ROTATION_GATES
+
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=is_rotation_collect,
+        respect_barriers=True,
+    )
+
+    n_approx = breakdown.get(None, 0)
+
+    if n_approx == 0:
+        def t_weight(node: DAGOpNode) -> int:
+            return t_costs.get(node._node_id, 0)
+
+        t_depth_val, _ = metric_depth_and_count(
+            circuit,
+            is_interesting=is_rotation,
+            node_weight=t_weight,
+            respect_barriers=True,
+        )
+    else:
+        t_depth_val = 0  # not meaningful; caller checks n_approx
+
+    return count, depth, t_depth_val, n_approx, breakdown
+
+
+def format_rotation_breakdown(breakdown: dict[int | None, int]) -> str:
+    """
+    Format the rotation breakdown as a compact annotation string, e.g.
+    ``clifford=2, T=3, T²=1, approx=1``.
+
+    Dyadic orders > 1 are written as T^n using Unicode superscripts.
+    """
+    _super = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+    def superscript(n: int) -> str:
+        return str(n).translate(_super)
+
+    parts = []
+    if breakdown.get(0, 0):
+        parts.append(f"clifford={breakdown[0]}")
+    # Emit dyadic orders in ascending order.
+    for n in sorted(k for k in breakdown if isinstance(k, int) and k >= 1):
+        label = "T" if n == 1 else f"T{superscript(n)}"
+        parts.append(f"{label}={breakdown[n]}")
+    if breakdown.get(None, 0):
+        parts.append(f"approx={breakdown[None]}")
+    return "  (" + ", ".join(parts) + ")" if parts else ""
 
 def _iter_condition_clbits(cond):
     """
@@ -309,74 +496,58 @@ def active_measurement_indices(circuit) -> set[int]:
     Return top-level instruction indices of measurements whose results
     influence later quantum execution through control flow.
 
-    Current semantics:
+    Semantics:
       - only measurements that write clbits later consumed by If/While/Switch
-        conditions are considered
-      - a later overwrite kills the earlier measurement
-      - only control-flow ops whose blocks contain quantum effects count
-      - analysis is over top-level measurement definitions; nested blocks are
-        scanned for control uses, but measurements inside nested blocks are not
-        returned by this function
+        conditions that gate quantum-affecting blocks are considered
+      - a later overwrite of a clbit kills the earlier measurement's activity
+      - nested measurements are not returned (only top-level indices)
     """
     from qiskit.circuit import ControlFlowOp, IfElseOp, WhileLoopOp, SwitchCaseOp
 
     data = list(circuit.data)
     active: set[int] = set()
+    # clbit -> index of last top-level measure writing it, or -1 if overwritten
+    # by a nested measure (so no longer attributable to a top-level instruction)
+    current_defs: dict[object, int] = {}
 
-    # Last top-level measurement that defined each clbit.
-    last_measure_def: dict[object, int] = {}
-
-    def process_block(block, reaching_defs):
-        current_defs = dict(reaching_defs)
-
-        for instruction in block.data:
-            op = instruction.operation
-
+    def process_block(block, reaching_defs: dict) -> None:
+        local = dict(reaching_defs)
+        for instr in block.data:
+            op = instr.operation
             if op.name == "measure":
-                for cbit in instruction.clbits:
-                    current_defs[cbit] = -1  # nested measurement, not top-level
+                for cbit in instr.clbits:
+                    local[cbit] = -1
                 continue
-
             if isinstance(op, (IfElseOp, WhileLoopOp)):
                 used = set(_iter_condition_clbits(op.condition))
                 if _block_has_quantum_effects(block) and used:
                     for cbit in used:
-                        src = current_defs.get(cbit)
+                        src = local.get(cbit)
                         if src is not None and src >= 0:
                             active.add(src)
-
                 for inner in op.blocks:
-                    process_block(inner, current_defs)
+                    process_block(inner, local)
                 continue
-
             if isinstance(op, SwitchCaseOp):
                 used = set(_iter_condition_clbits(op.target))
                 if _block_has_quantum_effects(block) and used:
                     for cbit in used:
-                        src = current_defs.get(cbit)
+                        src = local.get(cbit)
                         if src is not None and src >= 0:
                             active.add(src)
-
                 for inner in op.blocks:
-                    process_block(inner, current_defs)
+                    process_block(inner, local)
                 continue
-
             if isinstance(op, ControlFlowOp):
                 for inner in op.blocks:
-                    process_block(inner, current_defs)
+                    process_block(inner, local)
 
-        return
-
-    # Top-level pass.
-    current_defs = dict(last_measure_def)
-    for i, instruction in enumerate(data):
-        op = instruction.operation
-
+    for i, instr in enumerate(data):
+        op = instr.operation
         if op.name == "measure":
-            for cbit in instruction.clbits:
+            for cbit in instr.clbits:
                 current_defs[cbit] = i
             continue
-
         if isinstance(op, (IfElseOp, WhileLoopOp)):
             used = set(_iter_condition_clbits(op.condition))
             if any(_block_has_quantum_effects(inner) for inner in op.blocks):
@@ -384,11 +555,9 @@ def active_measurement_indices(circuit) -> set[int]:
                     src = current_defs.get(cbit)
                     if src is not None and src >= 0:
                         active.add(src)
-
             for inner in op.blocks:
                 process_block(inner, current_defs)
             continue
-
         if isinstance(op, SwitchCaseOp):
             used = set(_iter_condition_clbits(op.target))
             if any(_block_has_quantum_effects(inner) for inner in op.blocks):
@@ -396,19 +565,82 @@ def active_measurement_indices(circuit) -> set[int]:
                     src = current_defs.get(cbit)
                     if src is not None and src >= 0:
                         active.add(src)
-
             for inner in op.blocks:
                 process_block(inner, current_defs)
             continue
-
         if isinstance(op, ControlFlowOp):
             for inner in op.blocks:
                 process_block(inner, current_defs)
 
     return active
 
+
+def mcm_metrics(circuit) -> tuple[int, int]:
+    """
+    Return (count, depth) for active mid-circuit measurements.
+
+    Uses the same DAG-based dependency tracking as t_metrics and cx_metrics:
+    metric_depth_and_count walks the circuit DAG in topological order, so both
+    qubit-wire and clbit-wire data dependencies are automatically respected.
+
+    Active measurements are identified by the clbit-flow analysis in
+    active_measurement_indices.  Each active instruction index is mapped to its
+    corresponding DAGOpNode by pairing circuit.data and dag.topological_op_nodes()
+    in order, filtering both to measure ops.  This is correct because
+    circuit_to_dag processes circuit.data sequentially, so measure nodes appear
+    in the same relative order in both sequences.
+    """
+    active_instr_indices = active_measurement_indices(circuit)
+    if not active_instr_indices:
+        return 0, 0
+
+    # Map circuit instruction indices → DAG node IDs by walking the DAG in
+    # topological order and matching measure ops in the order they appear.
+    # circuit_to_dag processes circuit.data in order, so measure nodes appear
+    # in the same relative order in both circuit.data and the DAG's topological
+    # traversal.  We pair them up by counting measure ops seen so far.
+    dag = circuit_to_dag(circuit)
+    measure_instr_indices = [
+        i for i, instr in enumerate(circuit.data)
+        if instr.operation.name == "measure"
+    ]
+    active_node_ids: set[int] = set()
+    measure_dag_nodes = [
+        node for node in dag.topological_op_nodes()
+        if node.op.name == "measure"
+    ]
+    assert len(measure_dag_nodes) == len(measure_instr_indices), (
+        "DAG measure node count doesn't match circuit.data measure count"
+    )
+    for instr_idx, dag_node in zip(measure_instr_indices, measure_dag_nodes):
+        if instr_idx in active_instr_indices:
+            active_node_ids.add(dag_node._node_id)
+
+    def is_active_measure(node: DAGOpNode) -> bool:
+        return node._node_id in active_node_ids
+
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=is_active_measure,
+        respect_barriers=True,
+        dag=dag,
+    )
+    return count, depth
+
+
 def mcm_count(circuit) -> int:
-    return len(active_measurement_indices(circuit))
+    count, _depth = mcm_metrics(circuit)
+    return count
+
+
+def mcm_depth(circuit) -> int:
+    """
+    Dependency-aware MCM depth: the number of layers of active mid-circuit
+    measurements accounting for data dependencies, computed over the circuit
+    DAG exactly as T-depth and CX-depth are.
+    """
+    _count, depth = mcm_metrics(circuit)
+    return depth
 
 def format_gate_counts(circuit) -> str:
     counts = dict(circuit.count_ops())
@@ -460,15 +692,46 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
             rows.append(("t-count", tc))
             rows.append(("t-depth", td))
 
+    # Report CX-count/depth or two-qubit-count/depth, but not both:
+    #   - if CX is the only two-qubit gate present, CX metrics are sufficient
+    #   - if other two-qubit gates are present, CX metrics are misleading and
+    #     two-qubit metrics capture the full picture
+    #   - if any 3+-qubit gates are present, two-qubit metrics are incomplete
+    #     and neither CX nor 2q metrics are reported (unless basis-translated)
+    twoq_names = two_qubit_gate_names(circuit)
     if clifford_t or cx1q:
+        # After basis translation these modes guarantee only CX as the
+        # two-qubit gate, so CX metrics are always the right choice.
         cxc, cxd = cx_metrics(circuit)
         if cxc:
             rows.append(("cx-count", cxc))
             rows.append(("cx-depth", cxd))
+    elif has_many_qubit_gates(circuit):
+        pass  # 2q metrics would be incomplete; omit entirely
+    elif twoq_names == {"cx"}:
+        cxc, cxd = cx_metrics(circuit)
+        if cxc:
+            rows.append(("cx-count", cxc))
+            rows.append(("cx-depth", cxd))
+    elif twoq_names:
+        tqc, tqd = two_qubit_metrics(circuit)
+        if tqc:
+            rows.append(("2q-count", tqc))
+            rows.append(("2q-depth", tqd))
 
-    mcmc = mcm_count(circuit)
+    rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
+    if rc:
+        rows.append(("rot-count", f"{rc}{format_rotation_breakdown(rbreakdown)}"))
+        if rn_approx == 0:
+            t_depth_annotation = f"  (T-depth: {rt})"
+        else:
+            t_depth_annotation = "  (T-depth: n/a)"
+        rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
+
+    mcmc, mcmd = mcm_metrics(circuit)
     if mcmc:
         rows.append(("mcm-count", mcmc))
+        rows.append(("mcm-depth", mcmd))
 
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
