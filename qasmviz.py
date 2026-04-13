@@ -284,9 +284,15 @@ def two_qubit_metrics(circuit) -> tuple[int, int]:
     return count, depth
 
 
-# Single-qubit gates with a free continuous angle parameter — the gates that
-# drive Clifford+T / gridsynth synthesis cost.
-_ROTATION_GATES = {"rx", "ry", "rz", "p", "u1", "u2", "u3", "u"}
+# Gates tracked for rotation cost analysis: parameterized rotation gates plus
+# fixed-angle single-qubit non-Clifford/Clifford gates whose T-cost is known.
+_ROTATION_GATES = {"rx", "ry", "rz", "p", "u1", "u2", "u3", "u", "s", "sdg", "t", "tdg"}
+
+# Fixed T-costs for named gates that have no angle parameters.
+_FIXED_T_COST: dict[str, int] = {
+    "t": 1, "tdg": 1,
+    "s": 0, "sdg": 0,
+}
 
 # Standard named gates with known zero T-cost.  Does not include rotation
 # gates (whose T-cost depends on the angle) or T/Tdg (T-cost 1).
@@ -336,12 +342,15 @@ def _gate_t_cost(op) -> int | None:
     """
     Return the T-cost of a rotation gate operation.
 
-    For gates with multiple angle parameters (u, u2, u3), the cost is the
-    maximum over all parameters, since each non-Clifford parameter requires
-    independent synthesis but they can be parallelised.
+    For fixed-angle named gates (s, sdg, t, tdg), returns the known cost
+    directly.  For parameterized gates (rz, u, etc.), computes cost from
+    the angle.  For gates with multiple angle parameters (u, u2, u3), the
+    cost is the maximum over all parameters.
 
     Returns None if any parameter requires approximate synthesis.
     """
+    if op.name in _FIXED_T_COST:
+        return _FIXED_T_COST[op.name]
     costs = []
     for param in op.params:
         try:
@@ -908,15 +917,18 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
 
     if "rotations" in data:
         rot = data["rotations"]
+        clifford_count = rot["breakdown"].get("0", 0)
+        non_clifford_count = rot["count"] - clifford_count
+        count_str = f"{non_clifford_count}[+{clifford_count}]" if clifford_count else str(rot["count"])
         if "t-count" in rot:
             n_approx = rot["breakdown"].get("approx", 0)
             t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
             rot_count_str = (
-                f"{rot['count']}  "
+                f"{count_str}  "
                 f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
             )
         else:
-            rot_count_str = str(rot['count'])
+            rot_count_str = count_str
         metric_rows.append(("rot-count", rot_count_str))
         if "t-depth" in rot:
             if rot["t-depth"] is None:
@@ -972,16 +984,22 @@ def format_rotation_breakdown(breakdown: dict) -> str:
             return None
         return int(k)
 
-    parts = []
     norm = {normalise_key(k): v for k, v in breakdown.items()}
-    if norm.get(0, 0):
-        parts.append(f"clifford={norm[0]}")
+    non_clifford = []
     for n in sorted(k for k in norm if isinstance(k, int) and k >= 1):
         label = "T" if n == 1 else f"T{superscript(n)}"
-        parts.append(f"{label}={norm[n]}")
+        non_clifford.append(f"{label}={norm[n]}")
     if norm.get(None, 0):
-        parts.append(f"approx={norm[None]}")
-    return "; " + ", ".join(parts) if parts else ""
+        non_clifford.append(f"approx={norm[None]}")
+
+    clifford = []
+    if norm.get(0, 0):
+        clifford.append(f"clifford={norm[0]}")
+
+    sections = [", ".join(non_clifford)] if non_clifford else []
+    if clifford:
+        sections.append(", ".join(clifford))
+    return "; " + "; ".join(sections) if sections else ""
 
 def main() -> None:
     parser = argparse.ArgumentParser(
