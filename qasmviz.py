@@ -642,7 +642,12 @@ def mcm_depth(circuit) -> int:
     _count, depth = mcm_metrics(circuit)
     return depth
 
-def format_gate_counts(circuit) -> str:
+def format_gate_counts(circuit) -> tuple[int, str]:
+    """
+    Return (total, breakdown_str) where total is the total gate count and
+    breakdown_str is the per-type breakdown in preferred order, e.g.
+    ``"h=3, p=1, ccx=4"``.
+    """
     counts = dict(circuit.count_ops())
 
     preferred_order = [
@@ -678,13 +683,16 @@ def format_gate_counts(circuit) -> str:
         counts.items(),
         key=lambda kv: (rank.get(kv[0], len(preferred_order)), kv[0]),
     )
-    return ", ".join(f"{name}={count}" for name, count in items)
+    total = sum(c for _, c in items)
+    breakdown = ", ".join(f"{name}={count}" for name, count in items)
+    return total, breakdown
 
 def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
+    gate_total, gate_breakdown = format_gate_counts(circuit)
     rows: list[tuple[str, object]] = [
         ("width", circuit.num_qubits),
         ("depth", circuit.depth()),
-        ("gates", format_gate_counts(circuit)),
+        ("gates", f"{gate_total}  ({gate_breakdown})"),
     ]
 
     if clifford_t:
