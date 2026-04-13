@@ -404,29 +404,6 @@ def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]
     return count, depth, t_depth_val, n_approx, breakdown
 
 
-def format_rotation_breakdown(breakdown: dict[int | None, int]) -> str:
-    """
-    Format the rotation breakdown as a compact annotation string, e.g.
-    ``clifford=2, T=3, T²=1, approx=1``.
-
-    Dyadic orders > 1 are written as T^n using Unicode superscripts.
-    """
-    _super = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-
-    def superscript(n: int) -> str:
-        return str(n).translate(_super)
-
-    parts = []
-    if breakdown.get(0, 0):
-        parts.append(f"clifford={breakdown[0]}")
-    # Emit dyadic orders in ascending order.
-    for n in sorted(k for k in breakdown if isinstance(k, int) and k >= 1):
-        label = "T" if n == 1 else f"T{superscript(n)}"
-        parts.append(f"{label}={breakdown[n]}")
-    if breakdown.get(None, 0):
-        parts.append(f"approx={breakdown[None]}")
-    return "; " + ", ".join(parts) if parts else ""
-
 
 def t_cost_fully_known(circuit) -> bool:
     """
@@ -727,71 +704,74 @@ def format_gate_counts(circuit) -> tuple[int, str]:
     breakdown = ", ".join(f"{name}={count}" for name, count in items)
     return total, breakdown
 
-def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> None:
-    gate_total, gate_breakdown = format_gate_counts(circuit)
-    rows: list[tuple[str, object] | None] = [
-        ("width", circuit.num_qubits),
-        ("depth", circuit.depth()),
-        ("gates", f"{gate_total}  ({gate_breakdown})"),
-    ]
-    if circuit.num_clbits:
-        rows.append(("clbits", circuit.num_clbits))
+def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> dict:
+    """
+    Compute all cost metrics for the circuit and return them as a plain dict.
+    This is the single source of truth consumed by both print_costs and
+    print_costs_json.
 
-    metric_rows: list[tuple[str, object]] = []
+    Keys present depend on the circuit; absent metrics are not included.
+    Structured sub-fields (e.g. rotation breakdown) are nested dicts.
+    """
+    data: dict = {}
+
+    data["width"] = circuit.num_qubits
+    data["depth"] = circuit.depth()
+
+    gate_total, gate_breakdown = format_gate_counts(circuit)
+    data["gates"] = {"total": gate_total, "breakdown": gate_breakdown}
+
+    if circuit.num_clbits:
+        data["clbits"] = circuit.num_clbits
 
     if clifford_t:
         tc, td = t_metrics(circuit)
         if tc:
-            metric_rows.append(("t-count", tc))
-            metric_rows.append(("t-depth", td))
+            data["t-count"] = tc
+            data["t-depth"] = td
 
-    # Report CX-count/depth or two-qubit-count/depth, but not both:
-    #   - if CX is the only two-qubit gate present, CX metrics are sufficient
-    #   - if other two-qubit gates are present, CX metrics are misleading and
-    #     two-qubit metrics capture the full picture
-    #   - if any 3+-qubit gates are present, two-qubit metrics are incomplete
-    #     and neither CX nor 2q metrics are reported (unless basis-translated)
     twoq_names = two_qubit_gate_names(circuit)
     if clifford_t or cx1q or ibm:
-        # After basis translation these modes guarantee only CX as the
-        # two-qubit gate, so CX metrics are always the right choice.
         cxc, cxd = cx_metrics(circuit)
         if cxc:
-            metric_rows.append(("cx-count", cxc))
-            metric_rows.append(("cx-depth", cxd))
+            data["cx-count"] = cxc
+            data["cx-depth"] = cxd
     elif ibm_ecr:
         ecrc, ecrd = ecr_metrics(circuit)
         if ecrc:
-            metric_rows.append(("ecr-count", ecrc))
-            metric_rows.append(("ecr-depth", ecrd))
+            data["ecr-count"] = ecrc
+            data["ecr-depth"] = ecrd
     elif has_many_qubit_gates(circuit):
-        pass  # 2q metrics would be incomplete; omit entirely
+        pass
     elif twoq_names == {"cx"}:
         cxc, cxd = cx_metrics(circuit)
         if cxc:
-            metric_rows.append(("cx-count", cxc))
-            metric_rows.append(("cx-depth", cxd))
+            data["cx-count"] = cxc
+            data["cx-depth"] = cxd
     elif twoq_names:
         tqc, tqd = two_qubit_metrics(circuit)
         if tqc:
-            metric_rows.append(("2q-count", tqc))
-            metric_rows.append(("2q-depth", tqd))
+            data["2q-count"] = tqc
+            data["2q-depth"] = tqd
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
     if rc:
-        t_count = sum(
+        rot_t_count = sum(
             n * cnt for n, cnt in rbreakdown.items()
             if isinstance(n, int)
         )
-        rot_count_str = f"{rc}  (T-count: {t_count}{format_rotation_breakdown(rbreakdown)})"
-        metric_rows.append(("rot-count", rot_count_str))
-        if t_cost_fully_known(circuit) and rn_approx == 0 and rt > 0:
-            t_depth_annotation = f"  (T-depth: {rt})"
-        elif t_cost_fully_known(circuit) and rn_approx > 0:
-            t_depth_annotation = "  (T-depth: n/a)"
-        else:
-            t_depth_annotation = ""
-        metric_rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
+        rot: dict = {
+            "count": rc,
+            "depth": rd,
+            "t-count": rot_t_count,
+            "breakdown": {
+                (str(k) if k is not None else "approx"): v
+                for k, v in rbreakdown.items()
+            },
+        }
+        if t_cost_fully_known(circuit):
+            rot["t-depth"] = rt if rn_approx == 0 else None
+        data["rotations"] = rot
 
     mcmc, mcmd = mcm_metrics(circuit)
 
@@ -805,12 +785,65 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
         )
     )
 
-    measurement_rows: list[tuple[str, object]] = []
     if mcmc:
-        measurement_rows.append(("mcm-count", mcmc))
-        measurement_rows.append(("mcm-depth", mcmd))
+        data["mcm-count"] = mcmc
+        data["mcm-depth"] = mcmd
     if resets:
-        measurement_rows.append(("resets", resets))
+        data["resets"] = resets
+
+    return data
+
+
+def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx1q=cx1q, ibm=ibm, ibm_ecr=ibm_ecr)
+
+    rows: list[tuple[str, object] | None] = [
+        ("width", data["width"]),
+        ("depth", data["depth"]),
+        ("gates", f"{data['gates']['total']}  ({data['gates']['breakdown']})"),
+    ]
+    if "clbits" in data:
+        rows.append(("clbits", data["clbits"]))
+
+    metric_rows: list[tuple[str, object] | None] = []
+
+    if "t-count" in data:
+        metric_rows.append(("t-count", data["t-count"]))
+        metric_rows.append(("t-depth", data["t-depth"]))
+    if "cx-count" in data:
+        metric_rows.append(("cx-count", data["cx-count"]))
+        metric_rows.append(("cx-depth", data["cx-depth"]))
+    if "ecr-count" in data:
+        metric_rows.append(("ecr-count", data["ecr-count"]))
+        metric_rows.append(("ecr-depth", data["ecr-depth"]))
+    if "2q-count" in data:
+        metric_rows.append(("2q-count", data["2q-count"]))
+        metric_rows.append(("2q-depth", data["2q-depth"]))
+
+    if "rotations" in data:
+        rot = data["rotations"]
+        rot_count_str = (
+            f"{rot['count']}  "
+            f"(T-count: {rot['t-count']}{format_rotation_breakdown(rot['breakdown'])})"
+        )
+        metric_rows.append(("rot-count", rot_count_str))
+        if "t-depth" in rot:
+            if rot["t-depth"] is None:
+                t_depth_annotation = "  (T-depth: n/a)"
+            elif rot["t-depth"] > 0:
+                t_depth_annotation = f"  (T-depth: {rot['t-depth']})"
+            else:
+                t_depth_annotation = ""
+        else:
+            t_depth_annotation = ""
+        metric_rows.append(("rot-depth", f"{rot['depth']}{t_depth_annotation}"))
+
+    measurement_rows: list[tuple[str, object] | None] = []
+    if "mcm-count" in data:
+        measurement_rows.append(("mcm-count", data["mcm-count"]))
+        measurement_rows.append(("mcm-depth", data["mcm-depth"]))
+    if "resets" in data:
+        measurement_rows.append(("resets", data["resets"]))
 
     if metric_rows and measurement_rows:
         metric_rows.append(None)
@@ -825,14 +858,49 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
             label, value = row
             print(f"{label.rjust(label_width)}: {value}")
 
+
+
+def format_rotation_breakdown(breakdown: dict) -> str:
+    """
+    Format the rotation breakdown as a compact annotation string, e.g.
+    ``clifford=2, T=3, T²=1, approx=1``.
+
+    Accepts either int|None keys (from rotation_metrics) or str keys
+    (from collect_costs JSON-safe form).
+
+    Dyadic orders > 1 are written using Unicode superscripts.
+    """
+    _super = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+    def superscript(n: int) -> str:
+        return str(n).translate(_super)
+
+    # Normalise keys to int|None.
+    def normalise_key(k):
+        if k == "approx" or k is None:
+            return None
+        return int(k)
+
+    parts = []
+    norm = {normalise_key(k): v for k, v in breakdown.items()}
+    if norm.get(0, 0):
+        parts.append(f"clifford={norm[0]}")
+    for n in sorted(k for k in norm if isinstance(k, int) and k >= 1):
+        label = "T" if n == 1 else f"T{superscript(n)}"
+        parts.append(f"{label}={norm[n]}")
+    if norm.get(None, 0):
+        parts.append(f"approx={norm[None]}")
+    return "; " + ", ".join(parts) if parts else ""
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="read OpenQASM 3 from a file or stdin, optionally dump the selected circuit, print costs, and/or run it with qblaze."
     )
     parser.add_argument(
-        "qasm_file",
-        nargs="?",
-        help="optional `.qasm` file to read. reads `stdin` if omitted.",
+        "qasm_files",
+        nargs="*",
+        metavar="qasm_file",
+        help="`.qasm` files to read. reads `stdin` if omitted.",
     )
 
     compile_group = parser.add_mutually_exclusive_group()
@@ -879,6 +947,11 @@ def main() -> None:
         help="maximum allowed approximation error for Clifford+T synthesis. requires `--clifford-t`.",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="output cost metrics as JSON instead of human-readable text.",
+    )
+    parser.add_argument(
         "--dump",
         action="store_true",
         help="print the selected circuit.",
@@ -915,94 +988,131 @@ def main() -> None:
         parser.error("--eps requires --clifford-t")
     if args.eps is not None and args.eps <= 0:
         parser.error("--eps must be positive")
+    if args.json and args.dump:
+        parser.error("--json and --dump cannot be used together.")
+    if args.json and args.run:
+        parser.error("--json and --run cannot be used together.")
 
-    if args.qasm_file is not None:
-        with open(args.qasm_file, "r", encoding="utf-8") as f:
-            qasm3_code = f.read()
+    # Collect (filename_or_None, qasm_code) pairs.
+    if args.qasm_files:
+        inputs = []
+        for path in args.qasm_files:
+            with open(path, "r", encoding="utf-8") as f:
+                inputs.append((path, f.read()))
     else:
-        qasm3_code = sys.stdin.read()
+        inputs = [(None, sys.stdin.read())]
 
-    if not qasm3_code.strip():
-        raise SystemExit("No OpenQASM 3 code was provided.")
+    multiple = len(inputs) > 1
 
-    qc = parse(qasm3_code)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr)
 
-    if args.fez:
-        backend = FakeFez()
-        pm = generate_preset_pass_manager(
-            optimization_level=args.opt_level,
-            backend=backend,
-            seed_transpiler=777,
-        )
-        selected = pm.run(qc)
-    elif args.clifford_t:
-        pm_kwargs = dict(
-            optimization_level=args.opt_level,
-            basis_gates=CLIFFORD_T_BASIS,
-            seed_transpiler=777,
-        )
-        if args.eps is not None:
-            pm_kwargs["unitary_synthesis_method"] = "gridsynth"
-            pm_kwargs["unitary_synthesis_plugin_config"] = {"epsilon": args.eps}
-        pm = generate_preset_pass_manager(**pm_kwargs)
-        selected = pm.run(qc)
-    elif args.cx1q:
-        pm = generate_preset_pass_manager(
-            optimization_level=args.opt_level,
-            basis_gates=CX_1Q_BASIS,
-            seed_transpiler=777,
-        )
-        selected = pm.run(qc)
-    elif args.ibm:
-        pm = generate_preset_pass_manager(
-            optimization_level=args.opt_level,
-            basis_gates=IBM_BASIS,
-            seed_transpiler=777,
-        )
-        selected = pm.run(qc)
-    elif args.ibm_ecr:
-        pm = generate_preset_pass_manager(
-            optimization_level=args.opt_level,
-            basis_gates=IBM_ECR_BASIS,
-            seed_transpiler=777,
-        )
-        selected = pm.run(qc)
-    else:
-        selected = qc
+    json_results = [] if args.json and multiple else None
 
-    explicitly_selected_output = args.dump or args.run or args.cost
+    for file_idx, (filename, qasm3_code) in enumerate(inputs):
+        if not qasm3_code.strip():
+            source = filename or "stdin"
+            raise SystemExit(f"No OpenQASM 3 code in {source}.")
 
-    do_dump = args.dump or not explicitly_selected_output
-    do_run = args.run
-    do_cost = (do_dump or args.cost) and not args.no_cost
+        qc = parse(qasm3_code)
 
-    need_blank = False
-
-    if do_dump:
-        print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
-        need_blank = True
-
-    if do_cost:
-        if need_blank:
-            print()
-        print_costs(selected, clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr)
-        need_blank = True
-
-    if do_run:
-        if need_blank:
-            print()
-
-        clbits, values = run_circuit_and_capture(selected)
-
-        clbit_str = format_clbits(clbits)
-        if clbit_str:
-            print(f"classical bits: {clbit_str}")
-
-        if values:
-            max_abs = max(abs(v) for _, v in values)
-            print_pretty_state(values, max_abs=max_abs)
+        if args.fez:
+            backend = FakeFez()
+            pm = generate_preset_pass_manager(
+                optimization_level=args.opt_level,
+                backend=backend,
+                seed_transpiler=777,
+            )
+            selected = pm.run(qc)
+        elif args.clifford_t:
+            pm_kwargs = dict(
+                optimization_level=args.opt_level,
+                basis_gates=CLIFFORD_T_BASIS,
+                seed_transpiler=777,
+            )
+            if args.eps is not None:
+                pm_kwargs["unitary_synthesis_method"] = "gridsynth"
+                pm_kwargs["unitary_synthesis_plugin_config"] = {"epsilon": args.eps}
+            pm = generate_preset_pass_manager(**pm_kwargs)
+            selected = pm.run(qc)
+        elif args.cx1q:
+            pm = generate_preset_pass_manager(
+                optimization_level=args.opt_level,
+                basis_gates=CX_1Q_BASIS,
+                seed_transpiler=777,
+            )
+            selected = pm.run(qc)
+        elif args.ibm:
+            pm = generate_preset_pass_manager(
+                optimization_level=args.opt_level,
+                basis_gates=IBM_BASIS,
+                seed_transpiler=777,
+            )
+            selected = pm.run(qc)
+        elif args.ibm_ecr:
+            pm = generate_preset_pass_manager(
+                optimization_level=args.opt_level,
+                basis_gates=IBM_ECR_BASIS,
+                seed_transpiler=777,
+            )
+            selected = pm.run(qc)
         else:
-            print("0")
+            selected = qc
+
+        # With multiple files, default to --cost rather than --dump.
+        explicitly_selected_output = args.dump or args.run or args.cost or args.json
+        do_dump = args.dump or (not explicitly_selected_output and not multiple)
+        do_run = args.run
+        do_cost = (do_dump or args.cost or (multiple and not explicitly_selected_output)) and not args.no_cost
+        do_json = args.json
+
+        need_blank = False
+
+        if multiple and not do_json:
+            if file_idx > 0:
+                print()
+            print(f"### {filename}")
+            need_blank = True
+
+        if do_dump:
+            if need_blank:
+                print()
+            print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
+            need_blank = True
+
+        if do_cost:
+            if need_blank:
+                print()
+            print_costs(selected, **basis_kwargs)
+            need_blank = True
+
+        if do_json:
+            costs = collect_costs(selected, **basis_kwargs)
+            if multiple:
+                costs["file"] = filename
+                json_results.append(costs)
+            else:
+                import json
+                print(json.dumps(costs, indent=2))
+
+        if do_run:
+            if need_blank:
+                print()
+
+            clbits, values = run_circuit_and_capture(selected)
+
+            clbit_str = format_clbits(clbits)
+            if clbit_str:
+                print(f"classical bits: {clbit_str}")
+
+            if values:
+                max_abs = max(abs(v) for _, v in values)
+                print_pretty_state(values, max_abs=max_abs)
+            else:
+                print("0")
+
+    if json_results is not None:
+        import json
+        print(json.dumps(json_results, indent=2))
 
 
 if __name__ == "__main__":
