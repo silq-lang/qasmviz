@@ -268,6 +268,15 @@ def two_qubit_metrics(circuit) -> tuple[int, int]:
 # drive Clifford+T / gridsynth synthesis cost.
 _ROTATION_GATES = {"rx", "ry", "rz", "p", "u1", "u2", "u3", "u"}
 
+# Standard named gates with known zero T-cost.  Does not include rotation
+# gates (whose T-cost depends on the angle) or T/Tdg (T-cost 1).
+_CLIFFORD_GATES = {
+    # Single-qubit
+    "h", "s", "sdg", "x", "y", "z", "sx", "sxdg", "id",
+    # Two-qubit
+    "cx", "cy", "cz", "ch", "cs", "csdg", "swap", "iswap", "dcx", "ecr",
+}
+
 
 def _dyadic_t_cost(angle: float) -> int | None:
     """
@@ -407,6 +416,27 @@ def format_rotation_breakdown(breakdown: dict[int | None, int]) -> str:
     if breakdown.get(None, 0):
         parts.append(f"approx={breakdown[None]}")
     return "  (" + ", ".join(parts) + ")" if parts else ""
+
+
+def t_cost_fully_known(circuit) -> bool:
+    """
+    Return True if every gate in the circuit has a known T-cost, meaning
+    T-depth can be computed exactly from the rotation gate analysis.
+
+    A gate has known T-cost if it is:
+      - in _CLIFFORD_GATES (cost 0)
+      - t or tdg (cost 1)
+      - in _ROTATION_GATES (cost determined by angle — may still be approx)
+      - in _NON_GATE_OPS (measurements, barriers, resets — not gate costs)
+
+    Any other gate name is conservatively assumed to have unknown T-cost
+    (e.g. CCX, custom gates not in the standard sets).
+    """
+    _known = _CLIFFORD_GATES | {"t", "tdg"} | _ROTATION_GATES | _NON_GATE_OPS
+    return all(
+        instr.operation.name in _known
+        for instr in circuit.data
+    )
 
 def _iter_condition_clbits(cond):
     """
@@ -731,10 +761,12 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
     if rc:
         rows.append(("rot-count", f"{rc}{format_rotation_breakdown(rbreakdown)}"))
-        if rn_approx == 0:
+        if t_cost_fully_known(circuit) and rn_approx == 0 and rt > 0:
             t_depth_annotation = f"  (T-depth: {rt})"
-        else:
+        elif t_cost_fully_known(circuit) and rn_approx > 0:
             t_depth_annotation = "  (T-depth: n/a)"
+        else:
+            t_depth_annotation = ""
         rows.append(("rot-depth", f"{rd}{t_depth_annotation}"))
 
     mcmc, mcmd = mcm_metrics(circuit)
