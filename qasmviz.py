@@ -415,7 +415,7 @@ def format_rotation_breakdown(breakdown: dict[int | None, int]) -> str:
         parts.append(f"{label}={breakdown[n]}")
     if breakdown.get(None, 0):
         parts.append(f"approx={breakdown[None]}")
-    return "  (" + ", ".join(parts) + ")" if parts else ""
+    return "; " + ", ".join(parts) if parts else ""
 
 
 def t_cost_fully_known(circuit) -> bool:
@@ -719,11 +719,14 @@ def format_gate_counts(circuit) -> tuple[int, str]:
 
 def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     gate_total, gate_breakdown = format_gate_counts(circuit)
-    rows: list[tuple[str, object]] = [
+    rows: list[tuple[str, object] | None] = [
         ("width", circuit.num_qubits),
         ("depth", circuit.depth()),
         ("gates", f"{gate_total}  ({gate_breakdown})"),
     ]
+    if circuit.num_clbits:
+        rows.append(("clbits", circuit.num_clbits))
+    rows.append(None)  # blank separator
 
     if clifford_t:
         tc, td = t_metrics(circuit)
@@ -760,7 +763,12 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
     if rc:
-        rows.append(("rot-count", f"{rc}{format_rotation_breakdown(rbreakdown)}"))
+        t_count = sum(
+            n * cnt for n, cnt in rbreakdown.items()
+            if isinstance(n, int)
+        )
+        rot_count_str = f"{rc}  (T-count: {t_count}{format_rotation_breakdown(rbreakdown)})"
+        rows.append(("rot-count", rot_count_str))
         if t_cost_fully_known(circuit) and rn_approx == 0 and rt > 0:
             t_depth_annotation = f"  (T-depth: {rt})"
         elif t_cost_fully_known(circuit) and rn_approx > 0:
@@ -774,9 +782,13 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
         rows.append(("mcm-count", mcmc))
         rows.append(("mcm-depth", mcmd))
 
-    width = max(len(label) for label, _ in rows)
-    for label, value in rows:
-        print(f"{label.rjust(width)}: {value}")
+    label_width = max(len(row[0]) for row in rows if row is not None)
+    for row in rows:
+        if row is None:
+            print()
+        else:
+            label, value = row
+            print(f"{label.rjust(label_width)}: {value}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(
