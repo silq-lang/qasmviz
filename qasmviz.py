@@ -153,55 +153,73 @@ def run_circuit_and_capture(circuit) -> tuple[object, list[tuple[str, complex]]]
     values = sparse_statevector_from_sim(sim, circuit.num_qubits)
     return clbits, values
 
-def cx_count(circuit) -> int:
-    return sum(
-        1
-        for instruction in circuit.data
-        if instruction.operation.name == "cx"
+
+from collections.abc import Callable
+
+from qiskit.converters import circuit_to_dag
+from qiskit.dagcircuit import DAGOpNode
+
+
+def metric_depth_and_count(
+    circuit,
+    *,
+    is_interesting: Callable[[DAGOpNode], bool],
+    respect_barriers: bool = True,
+) -> tuple[int, int]:
+    """
+    Dependency-aware metric depth/count on the circuit DAG.
+
+    The metric depth is the length of the longest dependency-respecting path,
+    counting:
+      - 1 for each interesting node
+      - additionally 1 for each barrier node if respect_barriers=True
+
+    Non-interesting, non-barrier nodes propagate the current metric layer
+    without increasing it.
+    """
+    dag = circuit_to_dag(circuit)
+
+    level: dict[int, int] = {}
+    count = 0
+    depth = 0
+
+    for node in dag.topological_op_nodes():
+        preds = [
+            pred
+            for pred in dag.predecessors(node)
+            if isinstance(pred, DAGOpNode)
+        ]
+        base = max((level[pred._node_id] for pred in preds), default=0)
+
+        is_barrier = respect_barriers and node.op.name == "barrier"
+        interesting = is_interesting(node)
+
+        here = base + (1 if interesting or is_barrier else 0)
+        level[node._node_id] = here
+
+        if interesting:
+            count += 1
+            if here > depth:
+                depth = here
+
+    return depth, count
+
+def t_metrics(circuit) -> tuple[int, int]:
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=lambda node: node.op.name in {"t", "tdg"},
+        respect_barriers=True,
     )
+    return count, depth
 
 
-def cx_depth(circuit) -> int:
-    layer_for_qubit: dict[object, int] = {}
-    max_layer = 0
-
-    for instruction in circuit.data:
-        if instruction.operation.name != "cx":
-            continue
-
-        qubits = instruction.qubits
-        layer = 1 + max((layer_for_qubit.get(q, 0) for q in qubits), default=0)
-        for q in qubits:
-            layer_for_qubit[q] = layer
-        max_layer = max(max_layer, layer)
-
-    return max_layer
-
-
-def t_count(circuit) -> int:
-    return sum(
-        1
-        for instruction in circuit.data
-        if instruction.operation.name in {"t", "tdg"}
+def cx_metrics(circuit) -> tuple[int, int]:
+    depth, count = metric_depth_and_count(
+        circuit,
+        is_interesting=lambda node: node.op.name == "cx",
+        respect_barriers=True,
     )
-
-
-def t_depth(circuit) -> int:
-    layer_for_qubit: dict[object, int] = {}
-    max_layer = 0
-
-    for instruction in circuit.data:
-        if instruction.operation.name not in {"t", "tdg"}:
-            continue
-
-        qubits = instruction.qubits
-        layer = 1 + max((layer_for_qubit.get(q, 0) for q in qubits), default=0)
-        for q in qubits:
-            layer_for_qubit[q] = layer
-        max_layer = max(max_layer, layer)
-
-    return max_layer
-
+    return count, depth
 
 def format_gate_counts(circuit) -> str:
     counts = dict(circuit.count_ops())
@@ -241,7 +259,6 @@ def format_gate_counts(circuit) -> str:
     )
     return ", ".join(f"{name}={count}" for name, count in items)
 
-
 def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     rows: list[tuple[str, object]] = [
         ("qubits", circuit.num_qubits),
@@ -249,16 +266,16 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool) -> None:
     ]
 
     if clifford_t:
-        tc = t_count(circuit)
+        tc, td = t_metrics(circuit)
         if tc:
             rows.append(("t-count", tc))
-            rows.append(("t-depth", t_depth(circuit)))
+            rows.append(("t-depth", td))
 
     if clifford_t or cx1q:
-        cxc = cx_count(circuit)
+        cxc, cxd = cx_metrics(circuit)
         if cxc:
             rows.append(("cx-count", cxc))
-            rows.append(("cx-depth", cx_depth(circuit)))
+            rows.append(("cx-depth", cxd))
 
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
