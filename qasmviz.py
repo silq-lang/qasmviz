@@ -990,8 +990,6 @@ def main() -> None:
         parser.error("--eps must be positive")
     if args.json and args.dump:
         parser.error("--json and --dump cannot be used together.")
-    if args.json and args.run:
-        parser.error("--json and --run cannot be used together.")
 
     # Collect (filename_or_None, qasm_code) pairs.
     if args.qasm_files:
@@ -1087,6 +1085,13 @@ def main() -> None:
 
         if do_json:
             costs = collect_costs(selected, **basis_kwargs)
+            if do_run:
+                clbits, values = run_circuit_and_capture(selected)
+                costs["clbits"] = format_clbits(clbits) or None
+                costs["statevector"] = [
+                    {"basis": basis, "re": val.real, "im": val.imag}
+                    for basis, val in values
+                ] if values else []
             if multiple:
                 costs["file"] = filename
                 json_results.append(costs)
@@ -1094,7 +1099,7 @@ def main() -> None:
                 import json
                 print(json.dumps(costs, indent=2))
 
-        if do_run:
+        if do_run and not do_json:
             if need_blank:
                 print()
 
