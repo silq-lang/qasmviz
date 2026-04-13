@@ -842,12 +842,18 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
             data["2q-depth"] = tqd
 
     rc, rd, rt, rn_approx, rbreakdown = rotation_metrics(circuit)
+    _NAMED_ONLY = {"s", "sdg", "t", "tdg"}
+    has_parametric = any(
+        instr.operation.name in _ROTATION_GATES and instr.operation.name not in _NAMED_ONLY
+        for instr in circuit.data
+    )
+
     if physical:
         sxc, sxd = sx_metrics(circuit)
         if sxc:
             data["sx-count"] = sxc
             data["sx-depth"] = sxd
-    elif rc:
+    elif rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
