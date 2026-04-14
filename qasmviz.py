@@ -307,17 +307,17 @@ _CLIFFORD_GATES = {
 def _dyadic_t_cost(angle: float) -> int | None:
     """
     Return the exact T-count required to synthesize a rotation by ``angle``
-    radians, or None if the angle is not a dyadic rational multiple of π.
+    radians, or None if exact ancilla-free Clifford+T synthesis is not possible.
 
-    A rotation by kπ/2^n (in lowest terms, k odd, n ≥ 0) costs max(0, n-1)
-    T-gates:
+    A rotation by kπ/2^n (in lowest terms, k odd, n ≥ 0):
       - n=0: multiple of π      → identity or Z/X up to Clifford → 0
       - n=1: multiple of π/2    → S/Sdg or X/Y up to Clifford   → 0
       - n=2: multiple of π/4    → T/Tdg up to Clifford           → 1
-      - n=k: multiple of π/2^k                                   → k-1
+      - n>2: not exactly representable in the Clifford+T group    → None
 
-    Returns None for angles that are not dyadic rational multiples of π
-    (i.e. require approximate synthesis).
+    Returns None for n > 2 and for angles that are not dyadic rational
+    multiples of π; both cases require approximate synthesis whose cost
+    depends on the target precision ε.
     """
     # Normalise to [0, 2π).
     turns = (angle / math.pi) % 2.0   # angle in units of π, mod 2
@@ -334,7 +334,14 @@ def _dyadic_t_cost(angle: float) -> int | None:
                 n -= 1
             # n is now the 2-adic order of the denominator in lowest terms.
             # Clifford gates correspond to n ≤ 1 (multiples of π/2).
-            return max(0, n - 1)
+            # n == 2 (multiples of π/4) cost exactly 1 T-gate.
+            # n > 2 cannot be exactly synthesized in ancilla-free Clifford+T;
+            # they require approximate synthesis whose cost depends on ε.
+            if n <= 1:
+                return 0
+            if n == 2:
+                return 1
+            return None
     return None  # not a dyadic rational multiple of π
 
 
@@ -1110,8 +1117,10 @@ def main() -> None:
 
     if args.eps is not None and not args.clifford_t:
         parser.error("--eps requires --clifford-t")
-    if args.eps is not None and args.eps <= 0:
-        parser.error("--eps must be positive")
+    if args.eps is not None and args.eps < 0:
+        parser.error("--eps must be non-negative")
+    if args.eps == 0:
+        args.eps = None
     if args.json and args.show:
         parser.error("--json and --show cannot be used together.")
     if args.json and args.dump:
