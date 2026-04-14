@@ -953,7 +953,7 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
         metric_rows.append(("rot-count", rot_count_str))
         if "t-depth" in rot and not all_approx:
             if rot["t-depth"] is None:
-                t_depth_annotation = "  (T-depth: n/a)"
+                t_depth_annotation = ""
             elif rot["t-depth"] > 0:
                 t_depth_annotation = f"  (T-depth: {rot['t-depth']})"
             else:
