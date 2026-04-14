@@ -323,7 +323,7 @@ def _dyadic_t_cost(angle: float) -> int | None:
     turns = (angle / math.pi) % 2.0   # angle in units of π, mod 2
 
     # Check if turns is close to a dyadic rational k/2^n for increasing n.
-    MAX_N = 20
+    MAX_N = 2
     for n in range(MAX_N + 1):
         denom = 2 ** n
         k = round(turns * denom)
@@ -1074,6 +1074,13 @@ def main() -> None:
         help="maximum allowed approximation error for Clifford+T synthesis. requires `--clifford-t`.",
     )
     parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        metavar="N",
+        help="maximum qubit width available, including ancillas. the optimizer may use extra qubits up to this limit to reduce gate count or depth.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="output cost metrics as JSON. with `--run`, outputs simulation results as JSON instead.",
@@ -1122,6 +1129,10 @@ def main() -> None:
         parser.error("--eps must be non-negative")
     if args.eps == 0:
         args.eps = None
+    if args.width is not None and args.width < 1:
+        parser.error("--width must be at least 1")
+    if args.width is not None and args.fez:
+        parser.error("--width cannot be used with --fez")
     if args.json and args.show:
         parser.error("--json and --show cannot be used together.")
     if args.json and args.dump:
@@ -1151,6 +1162,22 @@ def main() -> None:
 
         qc = parse(qasm3_code)
 
+        if args.width is not None:
+            if qc.num_qubits > args.width:
+                source = filename or "stdin"
+                raise SystemExit(
+                    f"{source}: circuit has {qc.num_qubits} qubits, which exceeds --width {args.width}."
+                )
+            num_ancillas = args.width - qc.num_qubits
+        else:
+            num_ancillas = 0
+
+        if num_ancillas > 0:
+            from qiskit.transpiler.passes.synthesis.high_level_synthesis import HLSConfig
+            hls_config = HLSConfig(mcx=[("default", {"num_clean_ancillas": num_ancillas})])
+        else:
+            hls_config = None
+
         if args.fez:
             backend = FakeFez()
             pm = generate_preset_pass_manager(
@@ -1168,6 +1195,8 @@ def main() -> None:
             if args.eps is not None:
                 pm_kwargs["unitary_synthesis_method"] = "gridsynth"
                 pm_kwargs["unitary_synthesis_plugin_config"] = {"epsilon": args.eps}
+            if hls_config is not None:
+                pm_kwargs["hls_config"] = hls_config
             pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
         elif args.cx1q:
@@ -1175,6 +1204,7 @@ def main() -> None:
                 optimization_level=args.opt_level,
                 basis_gates=CX_1Q_BASIS,
                 seed_transpiler=777,
+                **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
         elif args.ibm:
@@ -1182,6 +1212,7 @@ def main() -> None:
                 optimization_level=args.opt_level,
                 basis_gates=IBM_BASIS,
                 seed_transpiler=777,
+                **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
         elif args.ibm_ecr:
@@ -1189,6 +1220,7 @@ def main() -> None:
                 optimization_level=args.opt_level,
                 basis_gates=IBM_ECR_BASIS,
                 seed_transpiler=777,
+                **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
         else:
