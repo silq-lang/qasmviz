@@ -943,11 +943,8 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
             if all_approx:
                 rot_count_str = count_str
             else:
-                t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
-                rot_count_str = (
-                    f"{count_str}  "
-                    f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
-                )
+                breakdown_str = format_rotation_breakdown(rot['breakdown'])
+                rot_count_str = f"{count_str}  ({breakdown_str.lstrip('; ')})" if breakdown_str else count_str
         else:
             rot_count_str = count_str
         metric_rows.append(("rot-count", rot_count_str))
