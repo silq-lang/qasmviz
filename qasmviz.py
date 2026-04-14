@@ -939,15 +939,19 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
         count_str = f"{non_clifford_count}[+{clifford_count}]" if clifford_count else str(rot["count"])
         if "t-count" in rot:
             n_approx = rot["breakdown"].get("approx", 0)
-            t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
-            rot_count_str = (
-                f"{count_str}  "
-                f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
-            )
+            all_approx = n_approx == rot["count"] - clifford_count
+            if all_approx:
+                rot_count_str = count_str
+            else:
+                t_count_str = f"{rot['t-count']}+?" if n_approx else str(rot['t-count'])
+                rot_count_str = (
+                    f"{count_str}  "
+                    f"(T-count: {t_count_str}{format_rotation_breakdown(rot['breakdown'])})"
+                )
         else:
             rot_count_str = count_str
         metric_rows.append(("rot-count", rot_count_str))
-        if "t-depth" in rot:
+        if "t-depth" in rot and not all_approx:
             if rot["t-depth"] is None:
                 t_depth_annotation = "  (T-depth: n/a)"
             elif rot["t-depth"] > 0:
