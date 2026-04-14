@@ -361,7 +361,7 @@ def _gate_t_cost(op) -> int | None:
         if c is None:
             return None
         costs.append(c)
-    return max(costs, default=0)
+    return sum(costs)
 
 
 def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]]:
@@ -399,10 +399,13 @@ def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]
     def is_rotation(node: DAGOpNode) -> bool:
         return node.op.name in _ROTATION_GATES
 
+    dag = circuit_to_dag(circuit)
+
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=is_rotation_collect,
         respect_barriers=True,
+        dag=dag,
     )
 
     n_approx = breakdown.get(None, 0)
@@ -416,6 +419,7 @@ def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]
             is_interesting=is_rotation,
             node_weight=t_weight,
             respect_barriers=True,
+            dag=dag,
         )
     else:
         t_depth_val = 0  # not meaningful; caller checks n_approx
