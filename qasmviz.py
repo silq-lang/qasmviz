@@ -2,7 +2,7 @@ import warnings
 
 warnings.filterwarnings(
     "ignore",
-    message=r".*You have imported samplomatic==.*beta development.*",
+    message=r"(?s).*You have imported samplomatic==.*beta development.*",
     category=UserWarning,
     module=r"samplomatic(\..*)?",
 )
