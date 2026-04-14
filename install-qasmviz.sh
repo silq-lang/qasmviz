@@ -10,7 +10,7 @@ src="$script_dir/qasmviz.sh"
 dst="/usr/local/bin/qasmviz"
 
 if [[ ! -f "$src" ]]; then
-    "$script_dir/make_qasmviz.sh"
+    "$script_dir/make-qasmviz.sh"
 fi
 
 "$script_dir/setup-venv.sh"
