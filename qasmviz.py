@@ -1549,9 +1549,13 @@ def main() -> None:
     for file_idx, (filename, qasm3_code) in enumerate(inputs):
         if not qasm3_code.strip():
             source = filename or "stdin"
-            raise SystemExit(f"No OpenQASM 3 code in {source}.")
+            raise SystemExit(f"No OpenQASM code in {source}.")
 
-        qc = parse(qasm3_code)
+        if qasm3_code.lstrip().startswith("OPENQASM 2"):
+            from qiskit import qasm2 as _qasm2_mod
+            qc = _qasm2_mod.loads(qasm3_code)
+        else:
+            qc = parse(qasm3_code)
 
         if args.width is not None:
             if qc.num_qubits > args.width:
