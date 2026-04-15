@@ -1617,10 +1617,18 @@ def main() -> None:
             need_blank = True
 
         if do_dump:
-            from qiskit import qasm3
             if need_blank:
                 print()
-            print(qasm3.dumps(selected))
+            if _cirq_qasm2 is not None:
+                qasm3_out = _cirq_qasm2.replace(
+                    'OPENQASM 2.0;\ninclude "qelib1.inc";',
+                    'OPENQASM 3.0;\ninclude "stdgates.inc";',
+                    1,
+                )
+                print(qasm3_out)
+            else:
+                from qiskit import qasm3
+                print(qasm3.dumps(selected))
             need_blank = True
 
         if do_dump2:
