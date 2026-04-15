@@ -1075,21 +1075,22 @@ def format_rotation_breakdown(breakdown: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Read OpenQASM 3 from a file or stdin, optionally transpile it, "
-            "then visualize, print costs, dump, and/or simulate the result. "
-            "The selected circuit is the original input by default, or the "
-            "transpiled circuit if a basis flag (--clifford-t, --cx-u, etc.) "
-            "or --fez is given."
+            "Read OpenQASM 3 from files or stdin, optionally transpile each "
+            "input circuit, then visualize, print costs, dump, and/or simulate "
+            "the selected circuit. The selected circuit is the original input "
+            "by default. If a target flag (--clifford-t, --cx-u, etc.) or "
+            "--fez is given, the selected circuit is the transpiled result instead."
         )
     )
     parser.add_argument(
         "qasm_files",
         nargs="*",
         metavar="qasm_file",
-        help="`.qasm` files to read. reads `stdin` if omitted.",
+        help="`.qasm` files to read. Each input is processed independently. Reads from `stdin` if omitted.",
     )
 
-    compile_group = parser.add_mutually_exclusive_group()
+    target_group = parser.add_argument_group("target selection (choose at most one)")
+    compile_group = target_group.add_mutually_exclusive_group()
     compile_group.add_argument(
         "--cx-u",
         action="store_true",
@@ -1138,7 +1139,8 @@ def main() -> None:
         help="transpile for FakeFez and use the execution-ready circuit.",
     )
 
-    parser.add_argument(
+    transpile_group = parser.add_argument_group("transpilation")
+    transpile_group.add_argument(
         "--opt",
         type=int,
         default=3,
@@ -1146,63 +1148,64 @@ def main() -> None:
         dest="opt_level",
         help="transpiler optimization level (default: 3).",
     )
-
-    parser.add_argument(
+    transpile_group.add_argument(
         "--eps",
         type=float,
-        help="maximum allowed approximation error for Clifford+T synthesis. requires `--clifford-t`.",
+        help="maximum allowed approximation error for Clifford+T synthesis. Requires `--clifford-t`.",
     )
-    parser.add_argument(
+    transpile_group.add_argument(
         "--width",
         type=int,
         default=None,
         metavar="N",
-        help="maximum qubit width available, including ancillas. the optimizer may use extra qubits up to this limit to reduce gate count or depth.",
+        help="maximum qubit width available, including ancillas. The optimizer may use extra qubits up to this limit to reduce gate count or depth.",
     )
-    parser.add_argument(
+
+    output_group = parser.add_argument_group("output control")
+    output_group.add_argument(
         "--json",
         action="store_true",
-        help="output cost metrics as JSON. with `--run`, outputs simulation results as JSON instead.",
+        help="emit cost metrics as JSON. With `--run`, emit simulation results as JSON instead.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--show",
         action="store_true",
         help="visualize the selected circuit.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--dump",
         action="store_true",
         help="dump the selected circuit as OpenQASM 3.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--dump2",
         action="store_true",
         help="dump the selected circuit as OpenQASM 2.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--run",
         action="store_true",
-        help="simulate the selected circuit with qblaze and print classical bits and final sparse state.",
+        help="simulate the selected circuit with qblaze and print the classical bits and final sparse state.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--cost",
         action="store_true",
         help="print operation counts even when not visualizing the circuit.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--no-cost",
         action="store_true",
         help="do not print operation counts, including after `--show`.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--fold",
         nargs="?",
         type=int,
         const=None,
         default=-1,
         help=(
-            "circuit draw fold width. default: `-1` (no folding). "
-            "use `--fold` for automatic width detection."
+            "circuit draw fold width. Default: `-1` (no folding). "
+            "Use `--fold` for automatic width detection."
         ),
     )
     args = parser.parse_args()
