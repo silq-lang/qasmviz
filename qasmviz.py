@@ -26,7 +26,7 @@ CX_SX_BASIS = ["rz", "sx", "cx"]
 ECR_SX_BASIS = ["rz", "sx", "ecr"]
 CZ_SX_BASIS = ["rz", "sx", "cz"]
 ISWAP_RX_BASIS = ["rz", "rx", "iswap"]
-RZZ_BASIS = ["rz", "rzz"]
+RZZ_RX_BASIS = ["rz", "rx", "rzz"]
 
 
 def arg_norm(x: float) -> float:
@@ -755,7 +755,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz: bool, fez: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, fez: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -766,9 +766,9 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz or fez
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or fez
     # The 1Q primitive gate to report count/depth for, if any.
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if iswap_rx else None
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if (iswap_rx or rzz_rx) else None
 
     data: dict = {}
 
@@ -862,7 +862,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["iswap-count"] = count
             data["iswap-depth"] = depth
-    elif rzz:
+    elif rzz_rx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "rzz",
@@ -914,7 +914,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
-    elif not fez and not rzz and rc and has_parametric:
+    elif not fez and not rzz_rx and rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
@@ -953,8 +953,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz: bool, fez: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz=rzz, fez=fez)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, fez: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, fez=fez)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1128,10 +1128,10 @@ def main() -> None:
         help="transpile into the basis {rz, rx, iswap}.",
     )
     compile_group.add_argument(
-        "--rzz",
+        "--rzz-rx",
         action="store_true",
-        dest="rzz",
-        help="transpile into the basis {rz, rzz}.",
+        dest="rzz_rx",
+        help="transpile into the basis {rz, rx, rzz}.",
     )
     compile_group.add_argument(
         "--fez",
@@ -1238,7 +1238,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz=args.rzz, fez=args.fez)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, fez=args.fez)
 
     json_results = [] if args.json and multiple else None
 
@@ -1286,14 +1286,14 @@ def main() -> None:
                 pm_kwargs["hls_config"] = hls_config
             pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
-        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz:
+        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rx:
             basis = (
                 CX_U_BASIS if args.cx_u else
                 CX_SX_BASIS if args.cx_sx else
                 ECR_SX_BASIS if args.ecr_sx else
                 CZ_SX_BASIS if args.cz_sx else
                 ISWAP_RX_BASIS if args.iswap_rx else
-                RZZ_BASIS
+                RZZ_RX_BASIS
             )
             pm = generate_preset_pass_manager(
                 optimization_level=args.opt_level,
