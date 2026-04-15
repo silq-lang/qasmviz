@@ -841,11 +841,25 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
             data["ecr-depth"] = ecrd
     elif has_many_qubit_gates(circuit):
         pass
-    elif twoq_names == {"cx"}:
-        cxc, cxd = cx_metrics(circuit)
-        if cxc:
-            data["cx-count"] = cxc
-            data["cx-depth"] = cxd
+    elif len(twoq_names) == 1:
+        name = next(iter(twoq_names))
+        if name == "cx":
+            tqc, tqd = cx_metrics(circuit)
+            key = "cx"
+        elif name == "ecr":
+            tqc, tqd = ecr_metrics(circuit)
+            key = "ecr"
+        else:
+            depth, count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name == name,
+                respect_barriers=True,
+            )
+            tqc, tqd = count, depth
+            key = name
+        if tqc:
+            data[f"{key}-count"] = tqc
+            data[f"{key}-depth"] = tqd
     elif twoq_names:
         tqc, tqd = two_qubit_metrics(circuit)
         if tqc:
@@ -916,15 +930,16 @@ def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bo
 
     metric_rows: list[tuple[str, object] | None] = []
 
-    if "cx-count" in data:
-        metric_rows.append(("cx-count", data["cx-count"]))
-        metric_rows.append(("cx-depth", data["cx-depth"]))
-    if "ecr-count" in data:
-        metric_rows.append(("ecr-count", data["ecr-count"]))
-        metric_rows.append(("ecr-depth", data["ecr-depth"]))
     if "2q-count" in data:
         metric_rows.append(("2q-count", data["2q-count"]))
         metric_rows.append(("2q-depth", data["2q-depth"]))
+    # Named 2q gate type (e.g. cx-count, ecr-count, cz-count, ...)
+    _known_non_gate_keys = {"2q-count", "sx-count", "t-count", "mcm-count"}
+    for key in data:
+        if key.endswith("-count") and key not in _known_non_gate_keys and key not in ("resets",):
+            gate = key[:-len("-count")]
+            metric_rows.append((f"{gate}-count", data[key]))
+            metric_rows.append((f"{gate}-depth", data[f"{gate}-depth"]))
     if "sx-count" in data:
         metric_rows.append(("sx-count", data["sx-count"]))
         metric_rows.append(("sx-depth", data["sx-depth"]))
@@ -1096,6 +1111,11 @@ def main() -> None:
         help="dump the selected circuit as OpenQASM 3.",
     )
     parser.add_argument(
+        "--dump2",
+        action="store_true",
+        help="dump the selected circuit as OpenQASM 2.",
+    )
+    parser.add_argument(
         "--run",
         action="store_true",
         help="simulate the selected circuit with qblaze and print classical bits and final sparse state.",
@@ -1227,12 +1247,13 @@ def main() -> None:
             selected = qc
 
         # With multiple files, default to --cost rather than --show.
-        explicitly_selected_output = args.show or args.dump or args.run or args.cost or args.json
+        explicitly_selected_output = args.show or args.dump or args.dump2 or args.run or args.cost or args.json
         do_show = args.show or (not explicitly_selected_output and not multiple)
         do_dump = args.dump
+        do_dump2 = args.dump2
         do_run = args.run
         default_cost = do_show or (multiple and not explicitly_selected_output)
-        do_cost = (args.cost or (default_cost and not args.run)) and not args.no_cost
+        do_cost = (args.cost or (default_cost and (args.show or not args.run))) and not args.no_cost
         do_json = args.json
 
         need_blank = False
@@ -1254,6 +1275,13 @@ def main() -> None:
             if need_blank:
                 print()
             print(qasm3.dumps(selected))
+            need_blank = True
+
+        if do_dump2:
+            from qiskit import qasm2
+            if need_blank:
+                print()
+            print(qasm2.dumps(selected))
             need_blank = True
 
         if do_cost:
