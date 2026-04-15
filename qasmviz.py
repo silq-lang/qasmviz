@@ -1548,6 +1548,7 @@ def main() -> None:
             hls_config = None
 
         _cirq_qasm2 = None
+        _compiled_cirq = None
 
         if args.fez:
             backend = FakeFez()
@@ -1613,7 +1614,11 @@ def main() -> None:
         if do_show:
             if need_blank:
                 print()
-            print(str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩"))
+            diagram = str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩")
+            if _cirq_qasm2 is not None:
+                for name in ("Phxz", "Syc", "Sqrt_iswap"):
+                    diagram = diagram.replace(name, name.lower())
+            print(diagram)
             need_blank = True
 
         if do_dump:
