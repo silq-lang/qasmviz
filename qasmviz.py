@@ -26,7 +26,7 @@ CX_SX_BASIS = ["rz", "sx", "cx"]
 ECR_SX_BASIS = ["rz", "sx", "ecr"]
 CZ_SX_BASIS = ["rz", "sx", "cz"]
 ISWAP_RX_BASIS = ["rz", "rx", "iswap"]
-RZZ_RZ_BASIS = ["rz", "rzz"]
+RZZ_BASIS = ["rz", "rzz"]
 
 
 def arg_norm(x: float) -> float:
@@ -755,7 +755,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rz: bool, fez: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz: bool, fez: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -766,7 +766,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rz or fez
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz or fez
     # The 1Q primitive gate to report count/depth for, if any.
     primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if iswap_rx else None
 
@@ -862,7 +862,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["iswap-count"] = count
             data["iswap-depth"] = depth
-    elif rzz_rz:
+    elif rzz:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "rzz",
@@ -914,7 +914,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
-    elif not fez and not rzz_rz and rc and has_parametric:
+    elif not fez and not rzz and rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
@@ -953,8 +953,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rz: bool, fez: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rz=rzz_rz, fez=fez)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz: bool, fez: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz=rzz, fez=fez)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1022,13 +1022,15 @@ def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: b
     metric_rows.extend(measurement_rows)
 
     all_rows = rows + ([None] + metric_rows if metric_rows else [])
-    label_width = max(len(row[0]) for row in all_rows if row is not None)
+    header_width = max(len(row[0]) for row in rows if row is not None)
+    metric_width = max((len(row[0]) for row in metric_rows if row is not None), default=0)
     for row in all_rows:
         if row is None:
             print()
         else:
             label, value = row
-            print(f"{label.rjust(label_width)}: {value}")
+            width = metric_width if metric_rows and row in metric_rows else header_width
+            print(f"{label.rjust(width)}: {value}")
 
 
 
@@ -1072,7 +1074,13 @@ def format_rotation_breakdown(breakdown: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="read OpenQASM 3 from a file or stdin, optionally visualize the selected circuit, print costs, and/or run it with qblaze."
+        description=(
+            "Read OpenQASM 3 from a file or stdin, optionally transpile it, "
+            "then visualize, print costs, dump, and/or simulate the result. "
+            "The selected circuit is the original input by default, or the "
+            "transpiled circuit if a basis flag (--clifford-t, --cx-u, etc.) "
+            "or --fez is given."
+        )
     )
     parser.add_argument(
         "qasm_files",
@@ -1119,9 +1127,9 @@ def main() -> None:
         help="transpile into the basis {rz, rx, iswap}.",
     )
     compile_group.add_argument(
-        "--rzz-rz",
+        "--rzz",
         action="store_true",
-        dest="rzz_rz",
+        dest="rzz",
         help="transpile into the basis {rz, rzz}.",
     )
     compile_group.add_argument(
@@ -1227,7 +1235,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rz=args.rzz_rz, fez=args.fez)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz=args.rzz, fez=args.fez)
 
     json_results = [] if args.json and multiple else None
 
@@ -1275,14 +1283,14 @@ def main() -> None:
                 pm_kwargs["hls_config"] = hls_config
             pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
-        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rz:
+        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz:
             basis = (
                 CX_U_BASIS if args.cx_u else
                 CX_SX_BASIS if args.cx_sx else
                 ECR_SX_BASIS if args.ecr_sx else
                 CZ_SX_BASIS if args.cz_sx else
                 ISWAP_RX_BASIS if args.iswap_rx else
-                RZZ_RZ_BASIS
+                RZZ_BASIS
             )
             pm = generate_preset_pass_manager(
                 optimization_level=args.opt_level,
