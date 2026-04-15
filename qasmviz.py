@@ -8,6 +8,7 @@ warnings.filterwarnings(
 )
 
 import sys
+import re
 import math
 import cmath
 import argparse
@@ -755,7 +756,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, fez: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -766,9 +767,11 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or fez
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or syc_phxz or sqrtiswap_phxz or fez
     # The 1Q primitive gate to report count/depth for, if any.
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if (iswap_rx or rzz_rx) else None
+    # For Cirq-based targets, phxz is the 1Q primitive but lives in the
+    # compiled_cirq circuit, not the Qiskit circuit — handled separately.
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if (iswap_rx or rzz_rx) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
 
     data: dict = {}
 
@@ -871,6 +874,24 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["rzz-count"] = count
             data["rzz-depth"] = depth
+    elif syc_phxz:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "syc",
+            respect_barriers=True,
+        )
+        if count:
+            data["syc-count"] = count
+            data["syc-depth"] = depth
+    elif sqrtiswap_phxz:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name in {"sqrt_iswap", "sqrt_iswap_inv"},
+            respect_barriers=True,
+        )
+        if count:
+            data["sqrt_iswap-count"] = count
+            data["sqrt_iswap-depth"] = depth
     elif has_many_qubit_gates(circuit):
         pass
     elif len(twoq_names) == 1:
@@ -914,7 +935,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
-    elif not fez and not rzz_rx and rc and has_parametric:
+    elif not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
@@ -953,8 +974,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, fez: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, fez=fez)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1072,6 +1093,255 @@ def format_rotation_breakdown(breakdown: dict) -> str:
         sections.append(", ".join(clifford))
     return "; " + "; ".join(sections) if sections else ""
 
+def _cirq_op_to_qasm_line(op, qubit_to_name: dict, precision: int = 10) -> str:
+    """
+    Emit a single QASM 2 instruction for a Cirq operation.
+    ``qubit_to_name`` maps each Cirq qubit to its QASM string name,
+    e.g. ``"q[0]"`` for circuit body or ``"q0"`` for gate definitions.
+    """
+    import cirq
+    import math as _math
+
+    gate = op.gate
+    qs = [qubit_to_name[q] for q in op.qubits]
+
+    def fmt(v):
+        # Format a float as a compact QASM number
+        return f"{v:.{precision}g}"
+
+    if isinstance(gate, cirq.PhasedXZGate):
+        x = gate.x_exponent
+        z = gate.z_exponent
+        a = gate.axis_phase_exponent
+        # PhasedXZGate = Z^{-a} X^x Z^{a} Z^z = rz(-a*pi) rx(x*pi) rz((a+z)*pi)
+        # In u3 form: u3(theta, phi, lam) = rz(phi+pi/2) ry(theta) rz(lam-pi/2)  -- not quite
+        # Emit as a named phxz gate call with parameters
+        a_val = fmt(float(a))
+        x_val = fmt(float(x))
+        z_val = fmt(float(z))
+        return f"phxz({a_val},{x_val},{z_val}) {qs[0]};"
+
+    if isinstance(gate, cirq.MeasurementGate):
+        key = gate.key
+        return "\n".join(f"measure {qs[i]} -> m_{key}[{i}];" for i in range(len(qs)))
+
+    # Named gate fallback: use gate's own _qasm_ if available, else error
+    name_map = {
+        cirq.XPowGate: lambda g: (f"rx({fmt(float(g.exponent)*_math.pi)})", 1),
+        cirq.YPowGate: lambda g: (f"ry({fmt(float(g.exponent)*_math.pi)})", 1),
+        cirq.ZPowGate: lambda g: (f"rz({fmt(float(g.exponent)*_math.pi)})", 1),
+        cirq.CZPowGate: lambda g: ("cz", 2) if float(g.exponent) == 1.0 else None,
+    }
+    for cls, fn in name_map.items():
+        if isinstance(gate, cls):
+            result = fn(gate)
+            if result is not None:
+                instr, _ = result
+                return f"{instr} {', '.join(qs)};"
+
+    # Try cirq's own _qasm_ protocol
+    args = cirq.QasmArgs(
+        precision=precision,
+        qubit_id_map={q: qs[i] for i, q in enumerate(op.qubits)},
+        version="2.0",
+    )
+    qasm_str = cirq.qasm(op, args=args, default=None)
+    if qasm_str is not None:
+        return qasm_str.strip()
+
+    raise ValueError(f"Don't know how to emit QASM for {op}")
+
+
+def _make_gate_definition(gate_name: str, body_ops_qasm: list[str], n_qubits: int) -> str:
+    """Emit an OpenQASM 2 gate definition block."""
+    qubit_names = [f"q{i}" for i in range(n_qubits)]
+    qubit_list = ", ".join(qubit_names)
+    body = "\n  ".join(body_ops_qasm)
+    return f"gate {gate_name} {qubit_list} {{\n  {body}\n}}"
+
+
+PHXZ_GATE_DEF = (
+    "gate phxz(a,x,z) q0 {\n"
+    "  rz(-a*pi) q0;\n"
+    "  rx(x*pi) q0;\n"
+    "  rz((a+z)*pi) q0;\n"
+    "}"
+)
+
+
+def _compile_cirq(qc, *, gateset_name: str):
+    """
+    Compile a Qiskit QuantumCircuit to a Google native gateset using Cirq,
+    returning (compiled_cirq_circuit, qiskit_circuit).
+
+    ``gateset_name`` is either ``"syc"`` or ``"sqrtiswap"``.
+
+    The compiled Cirq circuit is returned for cost analysis (counting
+    PhasedXZGate / SycamoreGate / SQRT_ISWAP).  The Qiskit circuit is
+    re-parsed from hand-crafted QASM that keeps the native gate names
+    (syc / sqrt_iswap / phxz) with gate definitions at the top, exactly
+    like Qiskit does for the ecr gate.
+
+    Raises ``SystemExit`` with a friendly message if cirq or cirq_google
+    are not installed.
+    """
+    try:
+        import cirq
+    except ImportError:
+        raise SystemExit("--syc-phxz/--sqrtiswap-phxz require cirq: pip install cirq")
+    if gateset_name == "syc":
+        try:
+            import cirq_google
+        except ImportError:
+            raise SystemExit("--syc-phxz requires cirq-google: pip install cirq-google")
+
+    import math as _math
+    import numpy as _np
+    from qiskit import qasm2 as qiskit_qasm2
+
+    from cirq.contrib.qasm_import import circuit_from_qasm as cirq_circuit_from_qasm
+
+    # Qiskit → QASM 2 → Cirq.
+    # Cirq's contrib QASM parser only knows qelib1.inc gates. Replace any
+    # 'p(...)' (PhaseGate, qelib1-absent but equivalent to rz up to global
+    # phase) with 'rz(...)' so the parser accepts it.
+    qasm2_str = qiskit_qasm2.dumps(qc)
+    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)
+    cirq_circuit = cirq_circuit_from_qasm(qasm2_str)
+
+    # Compile to target gateset. Suppress a Cirq-internal FutureWarning
+    # about use_repetition_ids that is triggered inside optimize_for_target_gateset.
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings(
+            "ignore",
+            message=r".*use_repetition_ids.*",
+            category=FutureWarning,
+            module=r"cirq.*",
+        )
+        if gateset_name == "syc":
+            gateset = cirq_google.SycamoreTargetGateset()
+            twoq_gate_name = "syc"
+        else:
+            gateset = cirq.SqrtIswapTargetGateset()
+            twoq_gate_name = "sqrt_iswap"
+        compiled_cirq = cirq.optimize_for_target_gateset(cirq_circuit, gateset=gateset)
+
+    # --- Step 3: build QASM manually, keeping native gate names ---
+    # Sort qubits for stable ordering
+    all_qubits = sorted(compiled_cirq.all_qubits())
+    n = len(all_qubits)
+    qubit_to_name = {q: f"q[{i}]" for i, q in enumerate(all_qubits)}
+
+    # Compute gate definition bodies using Cirq's own KAK decomposition
+    # by decomposing onto two fresh LineQubits and emitting the sub-ops.
+    def _gate_def_body(gate, n_qubits):
+        """Decompose gate to CZ+PhasedXZ and emit as rz/rx/cz QASM lines."""
+        lq = cirq.LineQubit.range(n_qubits)
+        dummy_op = gate(*lq)
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.filterwarnings("ignore", message=r".*use_repetition_ids.*", category=FutureWarning)
+            decomposed = cirq.Circuit(
+                cirq.optimize_for_target_gateset(
+                    cirq.Circuit(dummy_op),
+                    gateset=cirq.CZTargetGateset(),
+                )
+            )
+        body_lines = []
+        # Gate definition bodies use bare parameter names q0, q1, ...
+        def_qubit_to_name = {q: f"q{i}" for i, q in enumerate(lq)}
+        for moment in decomposed:
+            for op in moment.operations:
+                body_lines.append(_cirq_op_to_qasm_line(op, def_qubit_to_name))
+        return body_lines
+
+    # Collect which special gates actually appear
+    needs_syc = any(
+        isinstance(op.gate, cirq_google.SycamoreGate)
+        for moment in compiled_cirq for op in moment.operations
+    ) if gateset_name == "syc" else False
+    needs_sqrtiswap = any(
+        isinstance(op.gate, (cirq.SQRT_ISWAP_INV.__class__, cirq.ISwapPowGate))
+        and abs(abs(float(op.gate.exponent)) - 0.5) < 1e-6
+        for moment in compiled_cirq for op in moment.operations
+    ) if gateset_name == "sqrtiswap" else False
+
+    # Build gate definitions — phxz is always needed for PhasedXZGate
+    gate_defs = [PHXZ_GATE_DEF]
+    if needs_syc:
+        body = _gate_def_body(cirq_google.SYC, 2)
+        gate_defs.append(_make_gate_definition("syc", body, 2))
+    if needs_sqrtiswap:
+        body = _gate_def_body(cirq.SQRT_ISWAP, 2)
+        gate_defs.append(_make_gate_definition("sqrt_iswap", body, 2))
+
+    # Collect measurement keys
+    meas_keys = {}
+    for moment in compiled_cirq:
+        for op in moment.operations:
+            if isinstance(op.gate, cirq.MeasurementGate):
+                key = op.gate.key
+                if key not in meas_keys:
+                    meas_keys[key] = len(op.qubits)
+
+    # Emit QASM
+    lines = [
+        'OPENQASM 2.0;',
+        'include "qelib1.inc";',
+    ]
+    if gate_defs:
+        lines.append("")
+        lines.extend(gate_defs)
+    lines.append("")
+    lines.append(f"qreg q[{n}];")
+    for key, nbits in meas_keys.items():
+        lines.append(f"creg m_{key}[{nbits}];")
+    lines.append("")
+
+    for moment in compiled_cirq:
+        for op in moment.operations:
+            gate = op.gate
+            qs = [qubit_to_name[q] for q in op.qubits]
+
+            if isinstance(gate, cirq.MeasurementGate):
+                for i, q in enumerate(op.qubits):
+                    lines.append(f"measure {qubit_to_name[q]} -> m_{gate.key}[{i}];")
+            elif gateset_name == "syc" and isinstance(gate, cirq_google.SycamoreGate):
+                lines.append(f"syc {qs[0]}, {qs[1]};")
+            elif gateset_name == "sqrtiswap" and isinstance(gate, cirq.ISwapPowGate) and abs(float(gate.exponent) - 0.5) < 1e-6:
+                lines.append(f"sqrt_iswap {qs[0]}, {qs[1]};")
+            elif gateset_name == "sqrtiswap" and isinstance(gate, cirq.ISwapPowGate) and abs(float(gate.exponent) + 0.5) < 1e-6:
+                lines.append(f"sqrt_iswap_inv {qs[0]}, {qs[1]};")
+            else:
+                lines.append(_cirq_op_to_qasm_line(op, qubit_to_name))
+
+    qasm2_out = "\n".join(lines)
+
+    # --- Step 4: parse back to Qiskit ---
+    # Teach the parser about 'phxz(a,x,z)' which is our custom 1Q gate.
+    from qiskit.qasm2 import CustomInstruction
+    from qiskit.circuit.library import RZGate, RXGate
+    from qiskit.circuit import QuantumCircuit as _QC, Gate as _Gate
+    import numpy as _np2
+
+    class PhXZGate(_Gate):
+        def __init__(self, a, x, z):
+            super().__init__("phxz", 1, [a, x, z])
+        def _define(self):
+            qc = _QC(1)
+            a, x, z = self.params
+            qc.rz(-a * _np2.pi, 0)
+            qc.rx(x * _np2.pi, 0)
+            qc.rz((a + z) * _np2.pi, 0)
+            self.definition = qc
+
+    phxz_instruction = CustomInstruction("phxz", 3, 1, PhXZGate)
+    qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=[phxz_instruction])
+
+    return compiled_cirq, qiskit_circuit
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -1132,6 +1402,18 @@ def main() -> None:
         action="store_true",
         dest="rzz_rx",
         help="transpile into the basis {rz, rx, rzz}.",
+    )
+    compile_group.add_argument(
+        "--syc-phxz",
+        action="store_true",
+        dest="syc_phxz",
+        help="transpile into the basis {syc, phxz}. requires `cirq` and `cirq-google`.",
+    )
+    compile_group.add_argument(
+        "--sqrtiswap-phxz",
+        action="store_true",
+        dest="sqrtiswap_phxz",
+        help="transpile into the basis {sqrt_iswap, phxz}. requires `cirq`.",
     )
     compile_group.add_argument(
         "--fez",
@@ -1238,7 +1520,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, fez=args.fez)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, syc_phxz=args.syc_phxz, sqrtiswap_phxz=args.sqrtiswap_phxz, fez=args.fez)
 
     json_results = [] if args.json and multiple else None
 
@@ -1302,6 +1584,9 @@ def main() -> None:
                 **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
+        elif args.syc_phxz or args.sqrtiswap_phxz:
+            gateset_name = "syc" if args.syc_phxz else "sqrtiswap"
+            _compiled_cirq, selected = _compile_cirq(qc, gateset_name=gateset_name)
         else:
             selected = qc
 

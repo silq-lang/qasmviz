@@ -22,6 +22,7 @@ python -m pip install \
   qiskit-qasm3-import \
   qiskit-ibm-runtime \
   qiskit-aer \
+  cirq ply \
   qblaze
 
 echo "Done"
