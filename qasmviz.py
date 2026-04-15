@@ -935,7 +935,29 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
-    elif not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric:
+    else:
+        # Generic: if there is exactly one distinct 1Q gate type that isn't a
+        # known Clifford/rotation/measurement gate, report its count/depth.
+        # This handles re-imported circuits with custom gates like phxz.
+        _known_1q = _CLIFFORD_GATES | set(_ROTATION_GATES) | _NON_GATE_OPS | {"u", "u1", "u2", "u3"}
+        unknown_1q = {
+            instr.operation.name
+            for instr in circuit.data
+            if instr.operation.num_qubits == 1
+            and instr.operation.name not in _known_1q
+        }
+        if len(unknown_1q) == 1:
+            name_1q = next(iter(unknown_1q))
+            p1_depth, p1_count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node, _g=name_1q: node.op.name == _g,
+                respect_barriers=True,
+            )
+            if p1_count:
+                data[f"{name_1q}-count"] = p1_count
+                data[f"{name_1q}-depth"] = p1_depth
+
+    if not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
