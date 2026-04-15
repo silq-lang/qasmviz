@@ -21,9 +21,12 @@ import qblaze.qiskit
 
 
 CLIFFORD_T_BASIS = ["cx", "h", "s", "sdg", "t", "tdg"]
-CX_1Q_BASIS = ["cx", "u"]
-IBM_BASIS = ["rz", "sx", "cx"]
-IBM_ECR_BASIS = ["rz", "sx", "ecr"]
+CX_U_BASIS = ["cx", "u"]
+CX_SX_BASIS = ["rz", "sx", "cx"]
+ECR_SX_BASIS = ["rz", "sx", "ecr"]
+CZ_SX_BASIS = ["rz", "sx", "cz"]
+ISWAP_RX_BASIS = ["rz", "rx", "iswap"]
+RZZ_RZ_BASIS = ["rz", "rzz"]
 
 
 def arg_norm(x: float) -> float:
@@ -752,7 +755,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool, fez: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rz: bool, fez: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -761,17 +764,19 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     Keys present depend on the circuit; absent metrics are not included.
     Structured sub-fields (e.g. rotation breakdown) are nested dicts.
     """
-    # Physical execution modes target real hardware gate sets where T-count
-    # and fault-tolerant metrics are not meaningful.
-    physical = ibm or ibm_ecr or fez
+    # rz is a virtual gate (frame change) on both superconducting and trapped-ion
+    # hardware — it maps to a classical phase update with no pulse cost.
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rz or fez
+    # The 1Q primitive gate to report count/depth for, if any.
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if iswap_rx else None
 
     data: dict = {}
 
     data["width"] = circuit.num_qubits
 
-    if physical:
-        # On physical IBM hardware, rz is a virtual gate (frame change, zero
-        # pulse cost) and should not contribute to circuit depth.
+    if virtual_rz:
+        # rz is a virtual gate (frame change, zero pulse cost) and should
+        # not contribute to circuit depth.
         _VIRTUAL_GATES = {"rz", "p", "u1", "id"}
         data["depth"] = circuit.depth(
             filter_function=lambda instr: instr.operation.name not in _VIRTUAL_GATES
@@ -779,10 +784,10 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     else:
         data["depth"] = circuit.depth()
 
-    gate_display_total, gate_breakdown = format_gate_counts(circuit, physical=physical)
+    gate_display_total, gate_breakdown = format_gate_counts(circuit, physical=virtual_rz)
     gate_counts = dict(circuit.count_ops())
     _MEASURE_OPS_SET = {"reset", "measure", "barrier"}
-    _VIRTUAL_SET = {"rz", "p", "u1", "id"} if physical else set()
+    _VIRTUAL_SET = {"rz", "p", "u1", "id"} if virtual_rz else set()
 
     def _sorted_gate_dict(predicate):
         preferred = [
@@ -814,7 +819,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
         "gates": gates_dict,
         "ops": measure_dict,
     }
-    if physical:
+    if virtual_rz:
         data["gates"]["physical_count"] = physical_count
         data["gates"]["virtual_count"] = virtual_count
         data["gates"]["virtual"] = virtual_dict
@@ -829,16 +834,43 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
             data["t-depth"] = td
 
     twoq_names = two_qubit_gate_names(circuit)
-    if clifford_t or cx1q or ibm:
+    if clifford_t or cx_u or cx_sx:
         cxc, cxd = cx_metrics(circuit)
         if cxc:
             data["cx-count"] = cxc
             data["cx-depth"] = cxd
-    elif ibm_ecr:
+    elif ecr_sx:
         ecrc, ecrd = ecr_metrics(circuit)
         if ecrc:
             data["ecr-count"] = ecrc
             data["ecr-depth"] = ecrd
+    elif cz_sx:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "cz",
+            respect_barriers=True,
+        )
+        if count:
+            data["cz-count"] = count
+            data["cz-depth"] = depth
+    elif iswap_rx:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "iswap",
+            respect_barriers=True,
+        )
+        if count:
+            data["iswap-count"] = count
+            data["iswap-depth"] = depth
+    elif rzz_rz:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "rzz",
+            respect_barriers=True,
+        )
+        if count:
+            data["rzz-count"] = count
+            data["rzz-depth"] = depth
     elif has_many_qubit_gates(circuit):
         pass
     elif len(twoq_names) == 1:
@@ -873,12 +905,16 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
         for instr in circuit.data
     )
 
-    if physical:
-        sxc, sxd = sx_metrics(circuit)
-        if sxc:
-            data["sx-count"] = sxc
-            data["sx-depth"] = sxd
-    elif rc and has_parametric:
+    if primitive_1q is not None:
+        p1_depth, p1_count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node, _g=primitive_1q: node.op.name in {_g, _g + "dg"},
+            respect_barriers=True,
+        )
+        if p1_count:
+            data[f"{primitive_1q}-count"] = p1_count
+            data[f"{primitive_1q}-depth"] = p1_depth
+    elif not fez and not rzz_rz and rc and has_parametric:
         rot: dict = {
             "count": rc,
             "depth": rd,
@@ -917,8 +953,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: 
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx1q: bool, ibm: bool, ibm_ecr: bool, fez: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx1q=cx1q, ibm=ibm, ibm_ecr=ibm_ecr, fez=fez)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rz: bool, fez: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rz=rzz_rz, fez=fez)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1047,8 +1083,9 @@ def main() -> None:
 
     compile_group = parser.add_mutually_exclusive_group()
     compile_group.add_argument(
-        "--cx1q",
+        "--cx-u",
         action="store_true",
+        dest="cx_u",
         help="transpile into the basis {cx, u}.",
     )
     compile_group.add_argument(
@@ -1058,15 +1095,34 @@ def main() -> None:
         help="transpile into the Clifford+T basis {cx, h, s, sdg, t, tdg}.",
     )
     compile_group.add_argument(
-        "--ibm",
+        "--cx-sx",
         action="store_true",
-        help="transpile into the IBM basis {rz, sx, cx}.",
+        dest="cx_sx",
+        help="transpile into the basis {rz, sx, cx}.",
     )
     compile_group.add_argument(
-        "--ibm-ecr",
+        "--ecr-sx",
         action="store_true",
-        dest="ibm_ecr",
-        help="transpile into the IBM Heron basis {rz, sx, ecr}.",
+        dest="ecr_sx",
+        help="transpile into the basis {rz, sx, ecr}.",
+    )
+    compile_group.add_argument(
+        "--cz-sx",
+        action="store_true",
+        dest="cz_sx",
+        help="transpile into the basis {rz, sx, cz}.",
+    )
+    compile_group.add_argument(
+        "--iswap-rx",
+        action="store_true",
+        dest="iswap_rx",
+        help="transpile into the basis {rz, rx, iswap}.",
+    )
+    compile_group.add_argument(
+        "--rzz-rz",
+        action="store_true",
+        dest="rzz_rz",
+        help="transpile into the basis {rz, rzz}.",
     )
     compile_group.add_argument(
         "--fez",
@@ -1171,7 +1227,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx1q=args.cx1q, ibm=args.ibm, ibm_ecr=args.ibm_ecr, fez=args.fez)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rz=args.rzz_rz, fez=args.fez)
 
     json_results = [] if args.json and multiple else None
 
@@ -1219,26 +1275,18 @@ def main() -> None:
                 pm_kwargs["hls_config"] = hls_config
             pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
-        elif args.cx1q:
-            pm = generate_preset_pass_manager(
-                optimization_level=args.opt_level,
-                basis_gates=CX_1Q_BASIS,
-                seed_transpiler=777,
-                **({"hls_config": hls_config} if hls_config is not None else {}),
+        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rz:
+            basis = (
+                CX_U_BASIS if args.cx_u else
+                CX_SX_BASIS if args.cx_sx else
+                ECR_SX_BASIS if args.ecr_sx else
+                CZ_SX_BASIS if args.cz_sx else
+                ISWAP_RX_BASIS if args.iswap_rx else
+                RZZ_RZ_BASIS
             )
-            selected = pm.run(qc)
-        elif args.ibm:
             pm = generate_preset_pass_manager(
                 optimization_level=args.opt_level,
-                basis_gates=IBM_BASIS,
-                seed_transpiler=777,
-                **({"hls_config": hls_config} if hls_config is not None else {}),
-            )
-            selected = pm.run(qc)
-        elif args.ibm_ecr:
-            pm = generate_preset_pass_manager(
-                optimization_level=args.opt_level,
-                basis_gates=IBM_ECR_BASIS,
+                basis_gates=basis,
                 seed_transpiler=777,
                 **({"hls_config": hls_config} if hls_config is not None else {}),
             )
