@@ -1339,7 +1339,7 @@ def _compile_cirq(qc, *, gateset_name: str):
     phxz_instruction = CustomInstruction("phxz", 3, 1, PhXZGate)
     qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=[phxz_instruction])
 
-    return compiled_cirq, qiskit_circuit
+    return compiled_cirq, qiskit_circuit, qasm2_out
 
 
 def main() -> None:
@@ -1547,6 +1547,8 @@ def main() -> None:
         else:
             hls_config = None
 
+        _cirq_qasm2 = None
+
         if args.fez:
             backend = FakeFez()
             pm = generate_preset_pass_manager(
@@ -1586,7 +1588,7 @@ def main() -> None:
             selected = pm.run(qc)
         elif args.syc_phxz or args.sqrtiswap_phxz:
             gateset_name = "syc" if args.syc_phxz else "sqrtiswap"
-            _compiled_cirq, selected = _compile_cirq(qc, gateset_name=gateset_name)
+            _compiled_cirq, selected, _cirq_qasm2 = _compile_cirq(qc, gateset_name=gateset_name)
         else:
             selected = qc
 
@@ -1625,7 +1627,7 @@ def main() -> None:
             from qiskit import qasm2
             if need_blank:
                 print()
-            print(qasm2.dumps(selected))
+            print(_cirq_qasm2 if _cirq_qasm2 is not None else qasm2.dumps(selected))
             need_blank = True
 
         if do_cost:
