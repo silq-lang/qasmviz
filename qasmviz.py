@@ -1357,6 +1357,17 @@ def _compile_cirq(qc, *, gateset_name: str):
             qc.rx(x * _np2.pi, 0)
             qc.rz((a + z) * _np2.pi, 0)
             self.definition = qc
+        def to_matrix(self):
+            a, x, z = (float(p) for p in self.params)
+            # PhasedXZGate = rz(-a*pi) rx(x*pi) rz((a+z)*pi)  (left = last applied)
+            cx, sx = _np2.cos(x * _np2.pi / 2), _np2.sin(x * _np2.pi / 2)
+            rz1 = _np2.array([[_np2.exp(1j * a * _np2.pi / 2), 0],
+                               [0, _np2.exp(-1j * a * _np2.pi / 2)]])
+            rx  = _np2.array([[cx, -1j * sx], [-1j * sx, cx]])
+            az = (a + z) * _np2.pi
+            rz2 = _np2.array([[_np2.exp(-1j * az / 2), 0],
+                               [0, _np2.exp(1j * az / 2)]])
+            return rz2 @ rx @ rz1
 
     phxz_instruction = CustomInstruction("phxz", 3, 1, PhXZGate)
     qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=[phxz_instruction])
