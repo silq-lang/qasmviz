@@ -830,12 +830,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     if circuit.num_clbits:
         data["clbits"] = circuit.num_clbits
 
-    if clifford_t:
-        tc, td = t_metrics(circuit)
-        if tc:
-            data["t-count"] = tc
-            data["t-depth"] = td
-
     twoq_names = two_qubit_gate_names(circuit)
     if clifford_t or cx_u or cx_sx:
         cxc, cxd = cx_metrics(circuit)
@@ -957,7 +951,15 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
                 data[f"{name_1q}-count"] = p1_count
                 data[f"{name_1q}-depth"] = p1_depth
 
-    if not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric:
+    has_t = any(instr.operation.name in {"t", "tdg"} for instr in circuit.data)
+    will_show_rot = not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric
+    if (clifford_t or has_t) and not will_show_rot:
+        tc, td = t_metrics(circuit)
+        if tc:
+            data["t-count"] = tc
+            data["t-depth"] = td
+
+    if will_show_rot:
         rot: dict = {
             "count": rc,
             "depth": rd,
