@@ -1677,7 +1677,8 @@ def main() -> None:
             from qiskit import qasm2
             if need_blank:
                 print()
-            print(_cirq_qasm2 if _cirq_qasm2 is not None else qasm2.dumps(selected))
+            qasm2_out = _cirq_qasm2 if _cirq_qasm2 is not None else qasm2.dumps(selected)
+            print(re.sub(r'\bp\(', 'rz(', qasm2_out))
             need_blank = True
 
         if do_cost:
