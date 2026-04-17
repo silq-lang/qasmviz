@@ -29,6 +29,12 @@ CZ_SX_BASIS = ["rz", "sx", "cz"]
 ISWAP_RX_BASIS = ["rz", "rx", "iswap"]
 RZZ_RX_BASIS = ["rz", "rx", "rzz"]
 
+# Vendor-exact bases
+IBM_EAGLE_BASIS = ["ecr", "id", "rz", "sx", "x"]
+IBM_HERON_BASIS = ["cz", "id", "rz", "sx", "x"]
+IBM_HERON_FRAC_BASIS = ["cz", "id", "rz", "sx", "x", "rx", "rzz"]
+RIGETTI_ANKAA_BASIS = ["rx", "rz", "iswap"]
+
 
 def arg_norm(x: float) -> float:
     while x <= -math.pi:
@@ -756,7 +762,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -767,11 +773,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or syc_phxz or sqrtiswap_phxz or fez
-    # The 1Q primitive gate to report count/depth for, if any.
-    # For Cirq-based targets, phxz is the 1Q primitive but lives in the
-    # compiled_cirq circuit, not the Qiskit circuit — handled separately.
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx) else "rx" if (iswap_rx or rzz_rx) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron or ibm_heron_frac) else "rx" if (iswap_rx or rzz_rx or rigetti_ankaa) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
 
     data: dict = {}
 
@@ -886,6 +889,29 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["sqrt_iswap-count"] = count
             data["sqrt_iswap-depth"] = depth
+    elif ibm_eagle:
+        ecrc, ecrd = ecr_metrics(circuit)
+        if ecrc:
+            data["ecr-count"] = ecrc
+            data["ecr-depth"] = ecrd
+    elif ibm_heron or ibm_heron_frac:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "cz",
+            respect_barriers=True,
+        )
+        if count:
+            data["cz-count"] = count
+            data["cz-depth"] = depth
+    elif rigetti_ankaa:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "iswap",
+            respect_barriers=True,
+        )
+        if count:
+            data["iswap-count"] = count
+            data["iswap-depth"] = depth
     elif has_many_qubit_gates(circuit):
         pass
     elif len(twoq_names) == 1:
@@ -952,7 +978,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
                 data[f"{name_1q}-depth"] = p1_depth
 
     has_t = any(instr.operation.name in {"t", "tdg"} for instr in circuit.data)
-    will_show_rot = not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and rc and has_parametric
+    will_show_rot = not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and not ibm_heron_frac and rc and has_parametric
     if (clifford_t or has_t) and not will_show_rot:
         tc, td = t_metrics(circuit)
         if tc:
@@ -998,8 +1024,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1448,14 +1474,46 @@ def main() -> None:
         help="transpile into the proxy basis {sqrt_iswap, phxz}. sqrt-iSWAP / XY-family proxy. Requires `cirq`.",
     )
 
-    target_niche = parser.add_argument_group("vendor-specific targets")
-    target_niche.add_argument(
-        "--syc-phxz",
+    target_vendor = parser.add_argument_group("exact vendor targets")
+    target_vendor.add_argument(
+        "--ibm-eagle",
         action="store_true",
-        dest="syc_phxz",
-        help="transpile into the Google Sycamore target shorthand {syc, phxz}. Requires `cirq`.",
+        dest="ibm_eagle",
+        help="transpile into the IBM Eagle (ECR-family) basis {ecr, id, rz, sx, x}.",
     )
-    target_niche.add_argument(
+    target_vendor.add_argument(
+        "--ibm-heron",
+        action="store_true",
+        dest="ibm_heron",
+        help="transpile into the IBM Heron basis {cz, id, rz, sx, x}.",
+    )
+    target_vendor.add_argument(
+        "--ibm-heron-frac",
+        action="store_true",
+        dest="ibm_heron_frac",
+        help="transpile into the IBM Heron fractional-gate basis {cz, id, rz, sx, x, rx, rzz}.",
+    )
+    target_vendor.add_argument(
+        "--rigetti-ankaa",
+        action="store_true",
+        dest="rigetti_ankaa",
+        help="transpile into the Rigetti Ankaa basis {rx, rz, iswap}.",
+    )
+    target_vendor.add_argument(
+        "--google-sycamore",
+        action="store_true",
+        dest="google_sycamore",
+        help="transpile into the Google Sycamore target {syc, phxz}. Requires `cirq`.",
+    )
+    target_vendor.add_argument(
+        "--google-sqrtiswap",
+        action="store_true",
+        dest="google_sqrtiswap",
+        help="transpile into the Google sqrt-iSWAP target {sqrt_iswap, phxz}. Requires `cirq`.",
+    )
+
+    target_exec = parser.add_argument_group("execution-ready backend targets")
+    target_exec.add_argument(
         "--fez",
         action="store_true",
         help="transpile for FakeFez and use the execution-ready circuit.",
@@ -1534,7 +1592,9 @@ def main() -> None:
 
     _targets = [name for name in (
         "cx_u", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
-        "iswap_rx", "rzz_rx", "sqrtiswap_phxz", "syc_phxz", "fez",
+        "iswap_rx", "rzz_rx", "sqrtiswap_phxz", "fez",
+        "ibm_eagle", "ibm_heron", "ibm_heron_frac", "rigetti_ankaa",
+        "google_sycamore", "google_sqrtiswap",
     ) if getattr(args, name)]
     if len(_targets) > 1:
         parser.error(f"at most one target may be specified, got: {', '.join('--' + t.replace('_', '-') for t in _targets)}")
@@ -1567,7 +1627,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, syc_phxz=args.syc_phxz, sqrtiswap_phxz=args.sqrtiswap_phxz, fez=args.fez)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa)
 
     json_results = [] if args.json and multiple else None
 
@@ -1638,9 +1698,23 @@ def main() -> None:
                 **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
-        elif args.syc_phxz or args.sqrtiswap_phxz:
-            gateset_name = "syc" if args.syc_phxz else "sqrtiswap"
+        elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap:
+            gateset_name = "syc" if args.google_sycamore else "sqrtiswap"
             _compiled_cirq, selected, _cirq_qasm2 = _compile_cirq(qc, gateset_name=gateset_name)
+        elif args.ibm_eagle or args.ibm_heron or args.ibm_heron_frac or args.rigetti_ankaa:
+            basis = (
+                IBM_EAGLE_BASIS if args.ibm_eagle else
+                IBM_HERON_BASIS if args.ibm_heron else
+                IBM_HERON_FRAC_BASIS if args.ibm_heron_frac else
+                RIGETTI_ANKAA_BASIS
+            )
+            pm = generate_preset_pass_manager(
+                optimization_level=args.opt_level,
+                basis_gates=basis,
+                seed_transpiler=777,
+                **({"hls_config": hls_config} if hls_config is not None else {}),
+            )
+            selected = pm.run(qc)
         else:
             selected = qc
 
