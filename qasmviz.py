@@ -716,10 +716,13 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
     _VIRTUAL_GATE_NAMES = {"rz", "p", "u1", "id"} if physical else set()
 
     preferred_order = [
-        "cx", "ecr", "cz", "swap",
-        "h", "s", "sdg", "t", "tdg",
-        "x", "y", "z", "sx", "sxdg",
-        "rx", "ry", "rz", "p", "u", "u1", "u2", "u3", "id",
+        # 2Q gates
+        "cx", "ecr", "cz", "iswap", "rzz", "syc", "sqrt_iswap", "sqrt_iswap_inv",
+        "swap", "xx", "yy", "zz", "rxx", "ryy",
+        # fixed 1Q
+        "h", "s", "sdg", "t", "tdg", "x", "y", "z", "sx", "sxdg",
+        # parameterized 1Q
+        "rx", "ry", "rz", "p", "phxz", "u", "u1", "u2", "u3", "id",
     ]
     rank = {name: i for i, name in enumerate(preferred_order)}
 
@@ -774,7 +777,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
     virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron or ibm_heron_frac) else "rx" if (iswap_rx or rzz_rx or rigetti_ankaa) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
 
     data: dict = {}
 
@@ -895,14 +898,24 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             data["ecr-count"] = ecrc
             data["ecr-depth"] = ecrd
     elif ibm_heron or ibm_heron_frac:
-        depth, count = metric_depth_and_count(
-            circuit,
-            is_interesting=lambda node: node.op.name == "cz",
-            respect_barriers=True,
-        )
-        if count:
-            data["cz-count"] = count
-            data["cz-depth"] = depth
+        if ibm_heron_frac:
+            depth, count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name in {"cz", "rzz"},
+                respect_barriers=True,
+            )
+            if count:
+                data["2q-count"] = count
+                data["2q-depth"] = depth
+        else:
+            depth, count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name == "cz",
+                respect_barriers=True,
+            )
+            if count:
+                data["cz-count"] = count
+                data["cz-depth"] = depth
     elif rigetti_ankaa:
         depth, count = metric_depth_and_count(
             circuit,
@@ -952,15 +965,14 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             is_interesting=lambda node, _g=primitive_1q: node.op.name in {_g, _g + "dg"},
             respect_barriers=True,
         )
-        # For IBM targets, x is also a physical pulse costing 2 sx pulses.
-        # Fold it into sx-count (weighted) and sx-depth (unified).
-        if ibm_eagle or ibm_heron or ibm_heron_frac:
+        # For IBM Eagle/Heron: x costs 2 sx pulses; fold into sx-count (weighted), sx-depth (unified).
+        # For IBM Heron frac: report all physical 1Q gates together as 1q-count/1q-depth.
+        if ibm_eagle or ibm_heron:
             xd, xc = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "x",
                 respect_barriers=True,
             )
-            # depth: any layer with sx or x counts as one physical layer
             p1_depth_combined, _ = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name in {"sx", "sxdg", "x"},
@@ -970,6 +982,15 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             if p1_count_combined:
                 data["sx-count"] = p1_count_combined
                 data["sx-depth"] = p1_depth_combined
+        elif ibm_heron_frac:
+            oneq_depth, oneq_count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name in {"rx", "sx", "sxdg", "x"} and node.op.num_qubits == 1,
+                respect_barriers=True,
+            )
+            if oneq_count:
+                data["1q-count"] = oneq_count
+                data["1q-depth"] = oneq_depth
         elif p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
