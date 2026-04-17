@@ -1206,18 +1206,13 @@ def _compile_cirq(qc, *, gateset_name: str):
     (syc / sqrt_iswap / phxz) with gate definitions at the top, exactly
     like Qiskit does for the ecr gate.
 
-    Raises ``SystemExit`` with a friendly message if cirq or cirq_google
-    are not installed.
+    Raises ``SystemExit`` with a friendly message if cirq is not installed.
     """
     try:
         import cirq
+        import cirq_google
     except ImportError:
         raise SystemExit("--syc-phxz/--sqrtiswap-phxz require cirq: pip install cirq")
-    if gateset_name == "syc":
-        try:
-            import cirq_google
-        except ImportError:
-            raise SystemExit("--syc-phxz requires cirq-google: pip install cirq-google")
 
     import math as _math
     import numpy as _np
@@ -1383,8 +1378,8 @@ def main() -> None:
             "Read OpenQASM 3 from files or stdin, optionally transpile each "
             "input circuit, then visualize, print costs, dump, and/or simulate "
             "the selected circuit. The selected circuit is the original input "
-            "by default. If a target flag (--clifford-t, --cx-u, etc.) or "
-            "--fez is given, the selected circuit is the transpiled result instead."
+            "by default. If a target flag is given, the selected circuit is the "
+            "transpiled result instead."
         )
     )
     parser.add_argument(
@@ -1394,63 +1389,73 @@ def main() -> None:
         help="`.qasm` files to read. Each input is processed independently. Reads from `stdin` if omitted.",
     )
 
-    target_group = parser.add_argument_group("target selection (choose at most one)")
-    compile_group = target_group.add_mutually_exclusive_group()
-    compile_group.add_argument(
+    parser.add_argument_group("target selection (choose at most one)")
+
+    target_portable = parser.add_argument_group("portable / logical targets")
+    target_portable.add_argument(
         "--cx-u",
         action="store_true",
         dest="cx_u",
         help="transpile into the basis {cx, u}.",
     )
-    compile_group.add_argument(
+    target_portable.add_argument(
         "--clifford-t",
         action="store_true",
         dest="clifford_t",
         help="transpile into the Clifford+T basis {cx, h, s, sdg, t, tdg}.",
     )
-    compile_group.add_argument(
+
+    target_sc = parser.add_argument_group(
+        "hardware-family proxy targets",
+        "These are reduced compilation / cost-model targets. They preserve a hardware family's "
+        "dominant entangler and 1q rotation style, but they are not always the vendor's full "
+        "documented native gate set.",
+    )
+    target_sc.add_argument(
         "--cx-sx",
         action="store_true",
         dest="cx_sx",
-        help="transpile into the basis {rz, sx, cx}.",
+        help="transpile into the proxy basis {rz, sx, cx}. Generic CX-based superconducting proxy.",
     )
-    compile_group.add_argument(
+    target_sc.add_argument(
         "--ecr-sx",
         action="store_true",
         dest="ecr_sx",
-        help="transpile into the basis {rz, sx, ecr}.",
+        help="transpile into the proxy basis {rz, sx, ecr}. Cross-resonance / ECR-family proxy.",
     )
-    compile_group.add_argument(
+    target_sc.add_argument(
         "--cz-sx",
         action="store_true",
         dest="cz_sx",
-        help="transpile into the basis {rz, sx, cz}.",
+        help="transpile into the proxy basis {rz, sx, cz}. CZ-family superconducting proxy.",
     )
-    compile_group.add_argument(
+    target_sc.add_argument(
         "--iswap-rx",
         action="store_true",
         dest="iswap_rx",
-        help="transpile into the basis {rz, rx, iswap}.",
+        help="transpile into the proxy basis {rz, rx, iswap}. iSWAP-family proxy.",
     )
-    compile_group.add_argument(
+    target_sc.add_argument(
         "--rzz-rx",
         action="store_true",
         dest="rzz_rx",
-        help="transpile into the basis {rz, rx, rzz}.",
+        help="transpile into the proxy basis {rz, rx, rzz}. Parameterized-ZZ proxy.",
     )
-    compile_group.add_argument(
-        "--syc-phxz",
-        action="store_true",
-        dest="syc_phxz",
-        help="transpile into the basis {syc, phxz}. requires `cirq` and `cirq-google`.",
-    )
-    compile_group.add_argument(
+    target_sc.add_argument(
         "--sqrtiswap-phxz",
         action="store_true",
         dest="sqrtiswap_phxz",
-        help="transpile into the basis {sqrt_iswap, phxz}. requires `cirq`.",
+        help="transpile into the proxy basis {sqrt_iswap, phxz}. sqrt-iSWAP / XY-family proxy. Requires `cirq`.",
     )
-    compile_group.add_argument(
+
+    target_niche = parser.add_argument_group("vendor-specific targets")
+    target_niche.add_argument(
+        "--syc-phxz",
+        action="store_true",
+        dest="syc_phxz",
+        help="transpile into the Google Sycamore target shorthand {syc, phxz}. Requires `cirq`.",
+    )
+    target_niche.add_argument(
         "--fez",
         action="store_true",
         help="transpile for FakeFez and use the execution-ready circuit.",
@@ -1526,6 +1531,13 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    _targets = [name for name in (
+        "cx_u", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
+        "iswap_rx", "rzz_rx", "sqrtiswap_phxz", "syc_phxz", "fez",
+    ) if getattr(args, name)]
+    if len(_targets) > 1:
+        parser.error(f"at most one target may be specified, got: {', '.join('--' + t.replace('_', '-') for t in _targets)}")
 
     if args.eps is not None and not args.clifford_t:
         parser.error("--eps requires --clifford-t")
