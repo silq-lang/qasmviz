@@ -717,12 +717,12 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     preferred_order = [
         # 2Q gates
-        "cx", "ecr", "cz", "iswap", "rzz", "syc", "sqrt_iswap", "sqrt_iswap_inv",
+        "cx", "ecr", "cz", "iswap", "rzz", "xxphase", "zzphase", "zzmax", "syc", "sqrt_iswap", "sqrt_iswap_inv",
         "swap", "xx", "yy", "zz", "rxx", "ryy",
         # fixed 1Q
         "h", "s", "sdg", "t", "tdg", "x", "y", "z", "sx", "sxdg",
         # parameterized 1Q
-        "rx", "ry", "rz", "p", "phxz", "u", "u1", "u2", "u3", "id",
+        "rx", "ry", "rz", "p", "phxz", "phasedx", "u", "u1", "u2", "u3", "id",
     ]
     rank = {name: i for i, name in enumerate(preferred_order)}
 
@@ -765,7 +765,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, xxphase_rx: bool, zzphase_phasedx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -776,8 +776,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else None
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or xxphase_rx or zzphase_phasedx or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or xxphase_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else "phasedx" if zzphase_phasedx else None
 
     data: dict = {}
 
@@ -874,6 +874,24 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["rzz-count"] = count
             data["rzz-depth"] = depth
+    elif xxphase_rx:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "xxphase",
+            respect_barriers=True,
+        )
+        if count:
+            data["xxphase-count"] = count
+            data["xxphase-depth"] = depth
+    elif zzphase_phasedx:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "zzphase",
+            respect_barriers=True,
+        )
+        if count:
+            data["zzphase-count"] = count
+            data["zzphase-depth"] = depth
     elif syc_phxz:
         depth, count = metric_depth_and_count(
             circuit,
@@ -1063,8 +1081,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, xxphase_rx: bool, zzphase_phasedx: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, xxphase_rx=xxphase_rx, zzphase_phasedx=zzphase_phasedx, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1437,6 +1455,233 @@ def _compile_cirq(qc, *, gateset_name: str):
     return compiled_cirq, qiskit_circuit, qasm2_out
 
 
+# ---------------------------------------------------------------------------
+# pytket-based compilation
+# ---------------------------------------------------------------------------
+
+# Gate definitions for non-qelib1 gates that pytket may produce.
+# Parameters are in half-turns (multiples of pi) as pytket uses.
+_PYTKET_GATE_DEFS = {
+    # PhasedX(alpha, beta) = Rz(beta*pi) Rx(alpha*pi) Rz(-beta*pi)
+    "phasedx": (
+        "gate phasedx(alpha, beta) q0 {\n"
+        "  rz(-beta*pi) q0;\n"
+        "  rx(alpha*pi) q0;\n"
+        "  rz(beta*pi) q0;\n"
+        "}"
+    ),
+    # ZZPhase(alpha) = exp(-i * alpha*pi/2 * ZZ)
+    "zzphase": (
+        "gate zzphase(alpha) q0, q1 {\n"
+        "  cx q0, q1;\n"
+        "  rz(alpha*pi) q1;\n"
+        "  cx q0, q1;\n"
+        "}"
+    ),
+    # ZZMax = ZZPhase(0.5) = exp(-i*pi/4 * ZZ)
+    "zzmax": (
+        "gate zzmax q0, q1 {\n"
+        "  cx q0, q1;\n"
+        "  rz(pi/2) q1;\n"
+        "  cx q0, q1;\n"
+        "}"
+    ),
+    # XXPhase(alpha) = exp(-i * alpha*pi/2 * XX)
+    "xxphase": (
+        "gate xxphase(alpha) q0, q1 {\n"
+        "  h q0;\n"
+        "  h q1;\n"
+        "  cx q0, q1;\n"
+        "  rz(alpha*pi) q1;\n"
+        "  cx q0, q1;\n"
+        "  h q0;\n"
+        "  h q1;\n"
+        "}"
+    ),
+}
+
+
+def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10) -> str | None:
+    """
+    Emit a single QASM 2 instruction for a pytket Command.
+    Returns None for barrier/phase/noop operations that should be skipped.
+    All pytket angles are in half-turns; we multiply by pi for QASM radian args.
+    """
+    import math as _math
+    from pytket import OpType
+
+    op = cmd.op
+    optype = op.type
+    qs = [qubit_to_name[q] for q in cmd.qubits]
+
+    def fmt(v):
+        # Format a float as a compact QASM number (already in radians)
+        return f"{v:.{precision}g}"
+
+    def ht_to_rad(v):
+        # Half-turn to radian
+        return float(v) * _math.pi
+
+    params = op.params  # half-turns
+
+    # Standard qelib1 single-qubit gates
+    if optype == OpType.Rz:
+        return f"rz({fmt(ht_to_rad(params[0]))}) {qs[0]};"
+    if optype == OpType.Rx:
+        return f"rx({fmt(ht_to_rad(params[0]))}) {qs[0]};"
+    if optype == OpType.Ry:
+        return f"ry({fmt(ht_to_rad(params[0]))}) {qs[0]};"
+    if optype == OpType.H:
+        return f"h {qs[0]};"
+    if optype == OpType.X:
+        return f"x {qs[0]};"
+    if optype == OpType.Y:
+        return f"y {qs[0]};"
+    if optype == OpType.Z:
+        return f"z {qs[0]};"
+    if optype == OpType.S:
+        return f"s {qs[0]};"
+    if optype == OpType.Sdg:
+        return f"sdg {qs[0]};"
+    if optype == OpType.T:
+        return f"t {qs[0]};"
+    if optype == OpType.Tdg:
+        return f"tdg {qs[0]};"
+    if optype == OpType.SX:
+        return f"sx {qs[0]};"
+    if optype == OpType.SXdg:
+        return f"sxdg {qs[0]};"
+    if optype == OpType.U1:
+        return f"u1({fmt(ht_to_rad(params[0]))}) {qs[0]};"
+    if optype == OpType.U2:
+        return f"u2({fmt(ht_to_rad(params[0]))},{fmt(ht_to_rad(params[1]))}) {qs[0]};"
+    if optype == OpType.U3:
+        return f"u3({fmt(ht_to_rad(params[0]))},{fmt(ht_to_rad(params[1]))},{fmt(ht_to_rad(params[2]))}) {qs[0]};"
+
+    # Non-qelib1 single-qubit gates
+    if optype == OpType.PhasedX:
+        # phasedx(alpha, beta) — body emits rz/rx/rz
+        return f"phasedx({fmt(params[0])},{fmt(params[1])}) {qs[0]};"
+
+    # Standard 2Q gates
+    if optype == OpType.CX:
+        return f"cx {qs[0]}, {qs[1]};"
+    if optype == OpType.CZ:
+        return f"cz {qs[0]}, {qs[1]};"
+    if optype == OpType.ECR:
+        return f"ecr {qs[0]}, {qs[1]};"
+    if optype == OpType.ISWAPMax:
+        return f"iswap {qs[0]}, {qs[1]};"
+    if optype == OpType.ZZMax:
+        return f"zzmax {qs[0]}, {qs[1]};"
+
+    # Non-qelib1 2Q gates — use our custom gate names
+    if optype == OpType.ZZPhase:
+        return f"zzphase({fmt(params[0])}) {qs[0]}, {qs[1]};"
+    if optype == OpType.XXPhase:
+        return f"xxphase({fmt(params[0])}) {qs[0]}, {qs[1]};"
+
+    # Measurements
+    if optype == OpType.Measure:
+        bit = cmd.bits[0]
+        bit_name = f"m_{bit.reg_name}[{bit.index[0]}]"
+        return f"measure {qs[0]} -> {bit_name};"
+
+    # Barriers, noop, global phase — skip
+    if optype in (OpType.Barrier, OpType.noop, OpType.Phase):
+        return None
+
+    raise ValueError(f"_compile_pytket: don't know how to emit QASM for {cmd}")
+
+
+def _compile_pytket(qc, *, rebase_pass, gateset_name: str):
+    """
+    Compile a Qiskit QuantumCircuit using pytket, returning
+    (pytket_circuit, qiskit_circuit, qasm2_out).
+
+    ``rebase_pass`` is a callable pytket pass (e.g. AutoRebase instance)
+    that accepts a pytket Circuit and rebases it to the target gate set.
+
+    ``gateset_name`` is a short string used in error messages.
+
+    The QASM2 output uses hand-crafted gate definitions for any non-qelib1
+    gates in the compiled circuit (PhasedX, ZZPhase, XXPhase, etc.).
+
+    Raises SystemExit if pytket is not installed.
+    """
+    try:
+        from pytket.qasm import circuit_from_qasm_str, circuit_to_qasm_str
+        from pytket import OpType
+    except ImportError:
+        raise SystemExit(
+            f"--{gateset_name} requires pytket: pip install pytket"
+        )
+
+    from qiskit import qasm2 as qiskit_qasm2
+
+    # --- Step 1: Qiskit → QASM2 → pytket ---
+    qasm2_str = qiskit_qasm2.dumps(qc)
+    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)  # p( not in qelib1
+    tk_circuit = circuit_from_qasm_str(qasm2_str)
+
+    # --- Step 2: rebase ---
+    rebase_pass.apply(tk_circuit)
+
+    # --- Step 3: emit QASM2 with gate definitions ---
+    # Determine which non-qelib1 gates appear
+    needed_defs = set()
+    _PHASEDX_TYPES = {OpType.PhasedX}
+    _ZZPHASE_TYPES = {OpType.ZZPhase}
+    _ZZMAX_TYPES = {OpType.ZZMax}
+    _XXPHASE_TYPES = {OpType.XXPhase}
+    for cmd in tk_circuit.get_commands():
+        if cmd.op.type in _PHASEDX_TYPES:
+            needed_defs.add("phasedx")
+        elif cmd.op.type in _ZZPHASE_TYPES:
+            needed_defs.add("zzphase")
+        elif cmd.op.type in _ZZMAX_TYPES:
+            needed_defs.add("zzmax")
+        elif cmd.op.type in _XXPHASE_TYPES:
+            needed_defs.add("xxphase")
+
+    # Build qubit name map
+    all_qubits = tk_circuit.qubits
+    qubit_to_name = {q: f"q[{i}]" for i, q in enumerate(all_qubits)}
+
+    # Collect classical registers for measurements
+    creg_sizes: dict[str, int] = {}
+    for cmd in tk_circuit.get_commands():
+        from pytket import OpType as _OT
+        if cmd.op.type == _OT.Measure:
+            bit = cmd.bits[0]
+            reg = bit.reg_name
+            idx = bit.index[0]
+            creg_sizes[reg] = max(creg_sizes.get(reg, 0), idx + 1)
+
+    lines = ['OPENQASM 2.0;', 'include "qelib1.inc";']
+    if needed_defs:
+        lines.append("")
+        for gate_name in sorted(needed_defs):
+            lines.append(_PYTKET_GATE_DEFS[gate_name])
+    lines.append("")
+    lines.append(f"qreg q[{len(all_qubits)}];")
+    for reg, size in creg_sizes.items():
+        lines.append(f"creg m_{reg}[{size}];")
+    lines.append("")
+
+    for cmd in tk_circuit.get_commands():
+        line = _pytket_op_to_qasm_line(cmd, qubit_to_name)
+        if line is not None:
+            lines.append(line)
+
+    qasm2_out = "\n".join(lines)
+
+    # --- Step 4: QASM2 → Qiskit ---
+    qiskit_circuit = qiskit_qasm2.loads(qasm2_out)
+
+    return tk_circuit, qiskit_circuit, qasm2_out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -1511,6 +1756,18 @@ def main() -> None:
         action="store_true",
         dest="sqrtiswap_phxz",
         help="transpile into the proxy basis {sqrt_iswap, phxz}. sqrt-iSWAP / XY-family proxy. Requires `cirq`.",
+    )
+    target_sc.add_argument(
+        "--xxphase-rx",
+        action="store_true",
+        dest="xxphase_rx",
+        help="transpile into the proxy basis {rz, rx, xxphase}. Requires `pytket`.",
+    )
+    target_sc.add_argument(
+        "--zzphase-phasedx",
+        action="store_true",
+        dest="zzphase_phasedx",
+        help="transpile into the proxy basis {rz, phasedx, zzphase}. Quantinuum / trapped-ion proxy. Requires `pytket`.",
     )
 
     target_vendor = parser.add_argument_group("exact vendor targets")
@@ -1631,7 +1888,7 @@ def main() -> None:
 
     _targets = [name for name in (
         "cx_u", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
-        "iswap_rx", "rzz_rx", "sqrtiswap_phxz", "fez",
+        "iswap_rx", "rzz_rx", "xxphase_rx", "zzphase_phasedx", "sqrtiswap_phxz", "fez",
         "ibm_eagle", "ibm_heron", "ibm_heron_frac", "rigetti_ankaa",
         "google_sycamore", "google_sqrtiswap",
     ) if getattr(args, name)]
@@ -1666,7 +1923,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, xxphase_rx=args.xxphase_rx, zzphase_phasedx=args.zzphase_phasedx, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa)
 
     json_results = [] if args.json and multiple else None
 
@@ -1698,6 +1955,7 @@ def main() -> None:
             hls_config = None
 
         _cirq_qasm2 = None
+        _pytket_qasm2 = None
         _compiled_cirq = None
 
         if args.fez:
@@ -1737,6 +1995,26 @@ def main() -> None:
                 **({"hls_config": hls_config} if hls_config is not None else {}),
             )
             selected = pm.run(qc)
+        elif args.xxphase_rx:
+            try:
+                from pytket.passes import AutoRebase
+                from pytket import OpType
+            except ImportError:
+                raise SystemExit("--xy-rx requires pytket: pip install pytket")
+            rebase = AutoRebase({OpType.XXPhase, OpType.Rx, OpType.Rz})
+            _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
+                qc, rebase_pass=rebase, gateset_name="xy-rx"
+            )
+        elif args.zzphase_phasedx:
+            try:
+                from pytket.passes import AutoRebase
+                from pytket import OpType
+            except ImportError:
+                raise SystemExit("--phasedx-zzphase requires pytket: pip install pytket")
+            rebase = AutoRebase({OpType.PhasedX, OpType.ZZPhase, OpType.Rz})
+            _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
+                qc, rebase_pass=rebase, gateset_name="phasedx-zzphase"
+            )
         elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap:
             gateset_name = "syc" if args.google_sycamore else "sqrtiswap"
             _compiled_cirq, selected, _cirq_qasm2 = _compile_cirq(qc, gateset_name=gateset_name)
@@ -1788,13 +2066,13 @@ def main() -> None:
         if do_dump:
             if need_blank:
                 print()
-            if _cirq_qasm2 is not None:
-                qasm3_out = _cirq_qasm2.replace(
+            native_qasm2 = _cirq_qasm2 or _pytket_qasm2
+            if native_qasm2 is not None:
+                print(native_qasm2.replace(
                     'OPENQASM 2.0;\ninclude "qelib1.inc";',
                     'OPENQASM 3.0;\ninclude "stdgates.inc";',
                     1,
-                )
-                print(qasm3_out)
+                ))
             else:
                 from qiskit import qasm3
                 print(qasm3.dumps(selected))
@@ -1804,7 +2082,8 @@ def main() -> None:
             from qiskit import qasm2
             if need_blank:
                 print()
-            qasm2_out = _cirq_qasm2 if _cirq_qasm2 is not None else qasm2.dumps(selected)
+            native_qasm2 = _cirq_qasm2 or _pytket_qasm2
+            qasm2_out = native_qasm2 if native_qasm2 is not None else qasm2.dumps(selected)
             print(re.sub(r'\bp\(', 'rz(', qasm2_out))
             need_blank = True
 

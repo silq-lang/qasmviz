@@ -23,6 +23,7 @@ python -m pip install \
   qiskit-ibm-runtime \
   qiskit-aer \
   cirq ply \
+  pytket \
   qblaze
 
 echo "Done"
