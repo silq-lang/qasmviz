@@ -952,7 +952,25 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             is_interesting=lambda node, _g=primitive_1q: node.op.name in {_g, _g + "dg"},
             respect_barriers=True,
         )
-        if p1_count:
+        # For IBM targets, x is also a physical pulse costing 2 sx pulses.
+        # Fold it into sx-count (weighted) and sx-depth (unified).
+        if ibm_eagle or ibm_heron or ibm_heron_frac:
+            xd, xc = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name == "x",
+                respect_barriers=True,
+            )
+            # depth: any layer with sx or x counts as one physical layer
+            p1_depth_combined, _ = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name in {"sx", "sxdg", "x"},
+                respect_barriers=True,
+            )
+            p1_count_combined = p1_count + 2 * xc
+            if p1_count_combined:
+                data["sx-count"] = p1_count_combined
+                data["sx-depth"] = p1_depth_combined
+        elif p1_count:
             data[f"{primitive_1q}-count"] = p1_count
             data[f"{primitive_1q}-depth"] = p1_depth
     else:
