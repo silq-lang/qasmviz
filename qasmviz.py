@@ -29,6 +29,8 @@ CZ_SX_BASIS = ["rz", "sx", "cz"]
 ISWAP_RX_BASIS = ["rz", "rx", "iswap"]
 RZZ_RX_BASIS = ["rz", "rx", "rzz"]
 RXX_RX_BASIS = ["rz", "rx", "rxx"]
+CX_RX_BASIS = ["rz", "rx", "cx"]
+CZ_RX_BASIS = ["rz", "rx", "cz"]
 
 # Vendor-exact bases
 IBM_EAGLE_BASIS = ["ecr", "id", "rz", "sx", "x"]
@@ -766,7 +768,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, xxphase_rx: bool, quantinuum_h: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -777,8 +779,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or xxphase_rx or quantinuum_h or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or xxphase_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else "phasedx" if quantinuum_h else "gpi2" if (ionq_aria or ionq_forte) else None
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or iqm_garnet or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else "phasedx" if quantinuum_h else "prx" if iqm_garnet else "gpi2" if (ionq_aria or ionq_forte) else None
 
     data: dict = {}
 
@@ -884,6 +886,29 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["rxx-count"] = count
             data["rxx-depth"] = depth
+    elif cx_rx:
+        cxc, cxd = cx_metrics(circuit)
+        if cxc:
+            data["cx-count"] = cxc
+            data["cx-depth"] = cxd
+    elif cz_rx:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "cz",
+            respect_barriers=True,
+        )
+        if count:
+            data["cz-count"] = count
+            data["cz-depth"] = depth
+    elif iqm_garnet:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "cz",
+            respect_barriers=True,
+        )
+        if count:
+            data["cz-count"] = count
+            data["cz-depth"] = depth
     elif xxphase_rx:
         depth, count = metric_depth_and_count(
             circuit,
@@ -1014,6 +1039,13 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
                 is_interesting=lambda node: node.op.name in {"gpi2", "gpi"},
                 respect_barriers=True,
             )
+        elif primitive_1q == "prx":
+            # IQM Garnet: PRx has no dagger variant; just match "prx".
+            p1_depth, p1_count = metric_depth_and_count(
+                circuit,
+                is_interesting=lambda node: node.op.name == "prx",
+                respect_barriers=True,
+            )
         else:
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
@@ -1118,8 +1150,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, xxphase_rx: bool, quantinuum_h: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa, iqm_garnet=iqm_garnet)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1507,6 +1539,14 @@ _PYTKET_GATE_DEFS = {
         "  rz(beta*pi) q0;\n"
         "}"
     ),
+    # PRx(angle_t, phase_t) — IQM native gate, identical to PhasedX with same param convention
+    "prx": (
+        "gate prx(angle_t, phase_t) q0 {\n"
+        "  rz(-phase_t*pi) q0;\n"
+        "  rx(angle_t*pi) q0;\n"
+        "  rz(phase_t*pi) q0;\n"
+        "}"
+    ),
     # ZZPhase(alpha) = exp(-i * alpha*pi/2 * ZZ)
     "zzphase": (
         "gate zzphase(alpha) q0, q1 {\n"
@@ -1538,11 +1578,13 @@ _PYTKET_GATE_DEFS = {
 }
 
 
-def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10) -> str | None:
+def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10, phasedx_gate_name: str = "phasedx") -> str | None:
     """
     Emit a single QASM 2 instruction for a pytket Command.
     Returns None for barrier/phase/noop operations that should be skipped.
     All pytket angles are in half-turns; we multiply by pi for QASM radian args.
+    ``phasedx_gate_name`` controls the QASM gate name used for OpType.PhasedX
+    (e.g. ``"prx"`` for IQM targets).
     """
     import math as _math
     from pytket import OpType
@@ -1597,8 +1639,7 @@ def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10) -> st
 
     # Non-qelib1 single-qubit gates
     if optype == OpType.PhasedX:
-        # phasedx(alpha, beta) — body emits rz/rx/rz
-        return f"phasedx({fmt(params[0])},{fmt(params[1])}) {qs[0]};"
+        return f"{phasedx_gate_name}({fmt(params[0])},{fmt(params[1])}) {qs[0]};"
 
     # Standard 2Q gates
     if optype == OpType.CX:
@@ -1631,7 +1672,7 @@ def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10) -> st
     raise ValueError(f"_compile_pytket: don't know how to emit QASM for {cmd}")
 
 
-def _compile_pytket(qc, *, rebase_pass, gateset_name: str):
+def _compile_pytket(qc, *, rebase_pass, gateset_name: str, phasedx_gate_name: str = "phasedx"):
     """
     Compile a Qiskit QuantumCircuit using pytket, returning
     (pytket_circuit, qiskit_circuit, qasm2_out).
@@ -1640,6 +1681,9 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str):
     that accepts a pytket Circuit and rebases it to the target gate set.
 
     ``gateset_name`` is a short string used in error messages.
+
+    ``phasedx_gate_name`` is the QASM gate name to use for OpType.PhasedX
+    (default ``"phasedx"``; use ``"prx"`` for IQM targets).
 
     The QASM2 output uses hand-crafted gate definitions for any non-qelib1
     gates in the compiled circuit (PhasedX, ZZPhase, XXPhase, etc.).
@@ -1673,7 +1717,7 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str):
     _XXPHASE_TYPES = {OpType.XXPhase}
     for cmd in tk_circuit.get_commands():
         if cmd.op.type in _PHASEDX_TYPES:
-            needed_defs.add("phasedx")
+            needed_defs.add(phasedx_gate_name)
         elif cmd.op.type in _ZZPHASE_TYPES:
             needed_defs.add("zzphase")
         elif cmd.op.type in _ZZMAX_TYPES:
@@ -1707,7 +1751,7 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str):
     lines.append("")
 
     for cmd in tk_circuit.get_commands():
-        line = _pytket_op_to_qasm_line(cmd, qubit_to_name)
+        line = _pytket_op_to_qasm_line(cmd, qubit_to_name, phasedx_gate_name=phasedx_gate_name)
         if line is not None:
             lines.append(line)
 
@@ -2023,6 +2067,18 @@ def main() -> None:
         help="transpile into the proxy basis {rz, rx, rxx}. Parameterized-XX proxy.",
     )
     target_sc.add_argument(
+        "--cx-rx",
+        action="store_true",
+        dest="cx_rx",
+        help="transpile into the proxy basis {rz, rx, cx}. CX-family proxy with continuous 1Q rotations.",
+    )
+    target_sc.add_argument(
+        "--cz-rx",
+        action="store_true",
+        dest="cz_rx",
+        help="transpile into the proxy basis {rz, rx, cz}. CZ-family proxy with continuous 1Q rotations.",
+    )
+    target_sc.add_argument(
         "--sqrtiswap-phxz",
         action="store_true",
         dest="sqrtiswap_phxz",
@@ -2059,6 +2115,12 @@ def main() -> None:
         action="store_true",
         dest="rigetti_ankaa",
         help="transpile into the Rigetti Ankaa basis {rx, rz, iswap}.",
+    )
+    target_vendor.add_argument(
+        "--iqm-garnet",
+        action="store_true",
+        dest="iqm_garnet",
+        help="transpile into the IQM Garnet native basis {prx, cz}. Requires `pytket`.",
     )
     target_vendor.add_argument(
         "--quantinuum-h",
@@ -2171,9 +2233,9 @@ def main() -> None:
 
     _targets = [name for name in (
         "cx_u", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
-        "iswap_rx", "rzz_rx", "rxx_rx", "xxphase_rx", "sqrtiswap_phxz", "fez",
+        "iswap_rx", "rzz_rx", "rxx_rx", "cx_rx", "cz_rx", "xxphase_rx", "sqrtiswap_phxz", "fez",
         "ibm_eagle", "ibm_heron", "ibm_heron_frac", "rigetti_ankaa",
-        "quantinuum_h", "google_sycamore", "google_sqrtiswap",
+        "iqm_garnet", "quantinuum_h", "google_sycamore", "google_sqrtiswap",
         "ionq_aria", "ionq_forte",
     ) if getattr(args, name)]
     if len(_targets) > 1:
@@ -2207,7 +2269,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, cx_rx=args.cx_rx, cz_rx=args.cz_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa, iqm_garnet=args.iqm_garnet)
 
     json_results = [] if args.json and multiple else None
 
@@ -2263,7 +2325,7 @@ def main() -> None:
                 pm_kwargs["hls_config"] = hls_config
             pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
-        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rx or args.rxx_rx:
+        elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rx or args.rxx_rx or args.cx_rx or args.cz_rx:
             basis = (
                 CX_U_BASIS if args.cx_u else
                 CX_SX_BASIS if args.cx_sx else
@@ -2271,7 +2333,9 @@ def main() -> None:
                 CZ_SX_BASIS if args.cz_sx else
                 ISWAP_RX_BASIS if args.iswap_rx else
                 RZZ_RX_BASIS if args.rzz_rx else
-                RXX_RX_BASIS
+                RXX_RX_BASIS if args.rxx_rx else
+                CX_RX_BASIS if args.cx_rx else
+                CZ_RX_BASIS
             )
             pm = generate_preset_pass_manager(
                 optimization_level=args.opt_level,
@@ -2299,6 +2363,17 @@ def main() -> None:
             rebase = AutoRebase({OpType.PhasedX, OpType.ZZPhase, OpType.Rz})
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
                 qc, rebase_pass=rebase, gateset_name="quantinuum-h"
+            )
+        elif args.iqm_garnet:
+            try:
+                from pytket.passes import AutoRebase
+                from pytket import OpType
+            except ImportError:
+                raise SystemExit("--iqm-garnet requires pytket: pip install pytket")
+            rebase = AutoRebase({OpType.PhasedX, OpType.CZ, OpType.Rz})
+            _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
+                qc, rebase_pass=rebase, gateset_name="iqm-garnet",
+                phasedx_gate_name="prx",
             )
         elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap:
             gateset_name = "syc" if args.google_sycamore else "sqrtiswap"
@@ -2346,7 +2421,7 @@ def main() -> None:
                 print()
             diagram = str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩")
             if _cirq_qasm2 is not None or _pytket_qasm2 is not None:
-                for name in ("Phxz", "Syc", "Sqrt_iswap", "Gpi2", "Gpi", "Ms", "Zz", "Phasedx", "Zzphase", "Zzmax", "Xxphase"):
+                for name in ("Phxz", "Syc", "Sqrt_iswap", "Gpi2", "Gpi", "Ms", "Zz", "Phasedx", "Zzphase", "Zzmax", "Xxphase", "Prx"):
                     diagram = diagram.replace(name, name.lower())
             print(diagram)
             need_blank = True
