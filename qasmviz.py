@@ -2295,10 +2295,10 @@ def main() -> None:
                 from pytket.passes import AutoRebase
                 from pytket import OpType
             except ImportError:
-                raise SystemExit("--phasedx-zzphase requires pytket: pip install pytket")
+                raise SystemExit("--quantinuum-h requires pytket: pip install pytket")
             rebase = AutoRebase({OpType.PhasedX, OpType.ZZPhase, OpType.Rz})
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
-                qc, rebase_pass=rebase, gateset_name="phasedx-zzphase"
+                qc, rebase_pass=rebase, gateset_name="quantinuum-h"
             )
         elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap:
             gateset_name = "syc" if args.google_sycamore else "sqrtiswap"
