@@ -978,7 +978,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
                 data[f"{name_1q}-depth"] = p1_depth
 
     has_t = any(instr.operation.name in {"t", "tdg"} for instr in circuit.data)
-    will_show_rot = not fez and not rzz_rx and not syc_phxz and not sqrtiswap_phxz and not ibm_heron_frac and rc and has_parametric
+    will_show_rot = not virtual_rz and not clifford_t and rc and has_parametric
     if (clifford_t or has_t) and not will_show_rot:
         tc, td = t_metrics(circuit)
         if tc:
@@ -1444,16 +1444,16 @@ def main() -> None:
         help="transpile into the proxy basis {rz, sx, cx}. Generic CX-based superconducting proxy.",
     )
     target_sc.add_argument(
-        "--ecr-sx",
-        action="store_true",
-        dest="ecr_sx",
-        help="transpile into the proxy basis {rz, sx, ecr}. Cross-resonance / ECR-family proxy.",
-    )
-    target_sc.add_argument(
         "--cz-sx",
         action="store_true",
         dest="cz_sx",
         help="transpile into the proxy basis {rz, sx, cz}. CZ-family superconducting proxy.",
+    )
+    target_sc.add_argument(
+        "--ecr-sx",
+        action="store_true",
+        dest="ecr_sx",
+        help="transpile into the proxy basis {rz, sx, ecr}. Cross-resonance / ECR-family proxy.",
     )
     target_sc.add_argument(
         "--iswap-rx",
