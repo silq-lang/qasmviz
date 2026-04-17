@@ -2345,8 +2345,8 @@ def main() -> None:
             if need_blank:
                 print()
             diagram = str(selected.draw(fold=args.fold)).replace("|0>", "|0⟩")
-            if _cirq_qasm2 is not None:
-                for name in ("Phxz", "Syc", "Sqrt_iswap", "Gpi2", "Gpi", "Ms", "Zz"):
+            if _cirq_qasm2 is not None or _pytket_qasm2 is not None:
+                for name in ("Phxz", "Syc", "Sqrt_iswap", "Gpi2", "Gpi", "Ms", "Zz", "Phasedx", "Zzphase", "Zzmax", "Xxphase"):
                     diagram = diagram.replace(name, name.lower())
             print(diagram)
             need_blank = True
