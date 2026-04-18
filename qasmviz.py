@@ -120,6 +120,44 @@ def print_pretty_state(
         print(f"Error probability: {error_prob}")
 
 
+def cancel_swaps(circuit):
+    """
+    Eliminate SWAP gates by propagating them backwards to the initialisation.
+
+    All qubits are initialised to |0⟩, so any permutation of qubit indices at
+    the start of the circuit is a no-op.  This function scans the circuit in
+    reverse, accumulating each SWAP into a running permutation π instead of
+    emitting it, and relabelling every other gate's qubits through π.  Because
+    every SWAP is absorbed into π and π is discarded at the end (all-|0⟩ init),
+    the result contains no SWAP gates.
+
+    Works correctly with measurements, barriers, and all other gate types.
+    """
+    from qiskit import QuantumCircuit as _QC
+
+    qubits = list(circuit.qubits)
+    n = len(qubits)
+    qubit_to_idx = {q: i for i, q in enumerate(qubits)}
+
+    perm = list(range(n))  # perm[logical] = physical index
+    new_data = []
+
+    for instr in reversed(list(circuit.data)):
+        if instr.operation.name == "swap" and len(instr.qubits) == 2:
+            i = qubit_to_idx[instr.qubits[0]]
+            j = qubit_to_idx[instr.qubits[1]]
+            perm[i], perm[j] = perm[j], perm[i]
+        else:
+            new_qubits = tuple(qubits[perm[qubit_to_idx[q]]] for q in instr.qubits)
+            new_data.append(instr.replace(qubits=new_qubits))
+
+    new_data.reverse()
+    qc2 = _QC(*circuit.qregs, *circuit.cregs)
+    for instr in new_data:
+        qc2.append(instr.operation, instr.qubits, instr.clbits)
+    return qc2
+
+
 def format_clbits(clbits) -> str:
     def clbit_sort_key(bit) -> tuple[int, str]:
         idx = getattr(bit, "_index", None)
@@ -2337,6 +2375,12 @@ def main() -> None:
         metavar="N",
         help="maximum qubit width available, including ancillas. The optimizer may use extra qubits up to this limit to reduce gate count or depth.",
     )
+    transpile_group.add_argument(
+        "--no-cancel-swaps",
+        action="store_true",
+        dest="no_cancel_swaps",
+        help="disable SWAP cancellation pre-pass. By default, SWAPs are commuted to the initialisation and dropped (valid for all-|0⟩ circuits).",
+    )
 
     output_group = parser.add_argument_group("output control")
     output_group.add_argument(
@@ -2439,6 +2483,9 @@ def main() -> None:
             qc = _qasm2_mod.loads(qasm3_code)
         else:
             qc = parse(qasm3_code)
+
+        if not args.no_cancel_swaps:
+            qc = cancel_swaps(qc)
 
         if args.width is not None:
             if qc.num_qubits > args.width:
