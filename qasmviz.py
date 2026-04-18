@@ -767,7 +767,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti: bool, iqm_garnet: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti: bool, iqm: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -778,8 +778,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or aqt or iqm_garnet or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or quera_gemini or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or rigetti or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz or quera_gemini) else "phasedx" if quantinuum_h else "prx" if iqm_garnet else "r" if aqt else "u3" if tk2 else "gpi2" if (ionq_aria or ionq_forte) else None
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or aqt or iqm or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or quera_gemini or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or rigetti or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz or quera_gemini) else "phasedx" if quantinuum_h else "prx" if iqm else "r" if aqt else "u3" if tk2 else "gpi2" if (ionq_aria or ionq_forte) else None
 
     data: dict = {}
 
@@ -899,7 +899,7 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["cz-count"] = count
             data["cz-depth"] = depth
-    elif iqm_garnet:
+    elif iqm:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "cz",
@@ -1190,8 +1190,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti: bool, iqm_garnet: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, aqt=aqt, tk2=tk2, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, quera_gemini=quera_gemini, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti=rigetti, iqm_garnet=iqm_garnet)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti: bool, iqm: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, aqt=aqt, tk2=tk2, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, quera_gemini=quera_gemini, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti=rigetti, iqm=iqm)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -2261,10 +2261,10 @@ def main() -> None:
         help="transpile into the Rigetti native basis {rx, rz, iswap}.",
     )
     target_vendor.add_argument(
-        "--iqm-garnet",
+        "--iqm",
         action="store_true",
-        dest="iqm_garnet",
-        help="transpile into the IQM Garnet native basis {prx, cz}. Requires `pytket`.",
+        dest="iqm",
+        help="transpile into the IQM native basis {prx, cz}. Requires `pytket`.",
     )
     target_vendor.add_argument(
         "--aqt",
@@ -2391,7 +2391,7 @@ def main() -> None:
         "cx_u", "tk2", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
         "iswap_rx", "rzz_rx", "rxx_rx", "cx_rx", "cz_rx", "xxphase_rx", "sqrtiswap_phxz", "fez",
         "ibm_eagle", "ibm_heron", "ibm_heron_frac", "rigetti",
-        "iqm_garnet", "aqt", "quantinuum_h", "google_sycamore", "google_sqrtiswap", "quera_gemini",
+        "iqm", "aqt", "quantinuum_h", "google_sycamore", "google_sqrtiswap", "quera_gemini",
         "ionq_aria", "ionq_forte",
     ) if getattr(args, name)]
     if len(_targets) > 1:
@@ -2425,7 +2425,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, tk2=args.tk2, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, cx_rx=args.cx_rx, cz_rx=args.cz_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, aqt=args.aqt, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, quera_gemini=args.quera_gemini, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti=args.rigetti, iqm_garnet=args.iqm_garnet)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, tk2=args.tk2, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, cx_rx=args.cx_rx, cz_rx=args.cz_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, aqt=args.aqt, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, quera_gemini=args.quera_gemini, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti=args.rigetti, iqm=args.iqm)
 
     json_results = [] if args.json and multiple else None
 
@@ -2522,15 +2522,15 @@ def main() -> None:
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
                 qc, rebase_pass=rebase, gateset_name="quantinuum-h"
             )
-        elif args.iqm_garnet:
+        elif args.iqm:
             try:
                 from pytket.passes import AutoRebase
                 from pytket import OpType
             except ImportError:
-                raise SystemExit("--iqm-garnet requires pytket: pip install pytket")
+                raise SystemExit("--iqm requires pytket: pip install pytket")
             rebase = AutoRebase({OpType.PhasedX, OpType.CZ, OpType.Rz})
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket(
-                qc, rebase_pass=rebase, gateset_name="iqm-garnet",
+                qc, rebase_pass=rebase, gateset_name="iqm",
                 phasedx_gate_name="prx",
             )
         elif args.aqt:
