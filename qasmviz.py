@@ -768,7 +768,7 @@ def format_gate_counts(circuit, *, physical: bool = False) -> tuple[int, str]:
 
     return display_total, breakdown
 
-def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> dict:
+def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> dict:
     """
     Compute all cost metrics for the circuit and return them as a plain dict.
     This is the single source of truth consumed by both print_costs and
@@ -779,8 +779,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     """
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
-    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or aqt or iqm_garnet or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
-    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz) else "phasedx" if quantinuum_h else "prx" if iqm_garnet else "r" if aqt else "u3" if tk2 else "gpi2" if (ionq_aria or ionq_forte) else None
+    virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or aqt or iqm_garnet or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or quera_gemini or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti_ankaa
+    primitive_1q = "sx" if (cx_sx or ecr_sx or cz_sx or ibm_eagle or ibm_heron) else "rx" if (iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or rigetti_ankaa or ibm_heron_frac) else "phxz" if (syc_phxz or sqrtiswap_phxz or quera_gemini) else "phasedx" if quantinuum_h else "prx" if iqm_garnet else "r" if aqt else "u3" if tk2 else "gpi2" if (ionq_aria or ionq_forte) else None
 
     data: dict = {}
 
@@ -981,6 +981,15 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         if count:
             data["sqrt_iswap-count"] = count
             data["sqrt_iswap-depth"] = depth
+    elif quera_gemini:
+        depth, count = metric_depth_and_count(
+            circuit,
+            is_interesting=lambda node: node.op.name == "cz",
+            respect_barriers=True,
+        )
+        if count:
+            data["cz-count"] = count
+            data["cz-depth"] = depth
     elif ibm_eagle:
         ecrc, ecrd = ecr_metrics(circuit)
         if ecrc:
@@ -1182,8 +1191,8 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     return data
 
 
-def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> None:
-    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, aqt=aqt, tk2=tk2, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa, iqm_garnet=iqm_garnet)
+def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti_ankaa: bool, iqm_garnet: bool) -> None:
+    data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, aqt=aqt, tk2=tk2, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, quera_gemini=quera_gemini, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti_ankaa=rigetti_ankaa, iqm_garnet=iqm_garnet)
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -1382,21 +1391,25 @@ def _compile_cirq(qc, *, gateset_name: str):
     Compile a Qiskit QuantumCircuit to a Google native gateset using Cirq,
     returning (compiled_cirq_circuit, qiskit_circuit).
 
-    ``gateset_name`` is either ``"syc"`` or ``"sqrtiswap"``.
+    ``gateset_name`` is ``"syc"``, ``"sqrtiswap"``, or ``"cz"``.
 
     The compiled Cirq circuit is returned for cost analysis (counting
-    PhasedXZGate / SycamoreGate / SQRT_ISWAP).  The Qiskit circuit is
+    PhasedXZGate / SycamoreGate / SQRT_ISWAP / CZPowGate).  The Qiskit circuit is
     re-parsed from hand-crafted QASM that keeps the native gate names
-    (syc / sqrt_iswap / phxz) with gate definitions at the top, exactly
+    (syc / sqrt_iswap / phxz / cz) with gate definitions at the top, exactly
     like Qiskit does for the ecr gate.
 
     Raises ``SystemExit`` with a friendly message if cirq is not installed.
     """
     try:
         import cirq
-        import cirq_google
     except ImportError:
-        raise SystemExit("--syc-phxz/--sqrtiswap-phxz require cirq: pip install cirq")
+        raise SystemExit("--syc-phxz/--sqrtiswap-phxz/--quera-gemini require cirq: pip install cirq")
+    if gateset_name == "syc":
+        try:
+            import cirq_google
+        except ImportError:
+            raise SystemExit("--syc-phxz requires cirq-google: pip install cirq-google")
 
     import math as _math
     import numpy as _np
@@ -1425,6 +1438,9 @@ def _compile_cirq(qc, *, gateset_name: str):
         if gateset_name == "syc":
             gateset = cirq_google.SycamoreTargetGateset()
             twoq_gate_name = "syc"
+        elif gateset_name == "cz":
+            gateset = cirq.CZTargetGateset()
+            twoq_gate_name = "cz"
         else:
             gateset = cirq.SqrtIswapTargetGateset()
             twoq_gate_name = "sqrt_iswap"
@@ -2276,6 +2292,12 @@ def main() -> None:
         help="transpile into the Google sqrt-iSWAP target {sqrt_iswap, phxz}. Requires `cirq`.",
     )
     target_vendor.add_argument(
+        "--quera-gemini",
+        action="store_true",
+        dest="quera_gemini",
+        help="transpile into the QuEra Gemini native basis {phxz, cz}. Requires `cirq`.",
+    )
+    target_vendor.add_argument(
         "--ionq-aria",
         action="store_true",
         dest="ionq_aria",
@@ -2370,7 +2392,7 @@ def main() -> None:
         "cx_u", "tk2", "clifford_t", "cx_sx", "ecr_sx", "cz_sx",
         "iswap_rx", "rzz_rx", "rxx_rx", "cx_rx", "cz_rx", "xxphase_rx", "sqrtiswap_phxz", "fez",
         "ibm_eagle", "ibm_heron", "ibm_heron_frac", "rigetti_ankaa",
-        "iqm_garnet", "aqt", "quantinuum_h", "google_sycamore", "google_sqrtiswap",
+        "iqm_garnet", "aqt", "quantinuum_h", "google_sycamore", "google_sqrtiswap", "quera_gemini",
         "ionq_aria", "ionq_forte",
     ) if getattr(args, name)]
     if len(_targets) > 1:
@@ -2404,7 +2426,7 @@ def main() -> None:
 
     multiple = len(inputs) > 1
 
-    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, tk2=args.tk2, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, cx_rx=args.cx_rx, cz_rx=args.cz_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, aqt=args.aqt, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa, iqm_garnet=args.iqm_garnet)
+    basis_kwargs = dict(clifford_t=args.clifford_t, cx_u=args.cx_u, tk2=args.tk2, cx_sx=args.cx_sx, ecr_sx=args.ecr_sx, cz_sx=args.cz_sx, iswap_rx=args.iswap_rx, rzz_rx=args.rzz_rx, rxx_rx=args.rxx_rx, cx_rx=args.cx_rx, cz_rx=args.cz_rx, xxphase_rx=args.xxphase_rx, quantinuum_h=args.quantinuum_h, aqt=args.aqt, ionq_aria=args.ionq_aria, ionq_forte=args.ionq_forte, syc_phxz=args.google_sycamore, sqrtiswap_phxz=args.sqrtiswap_phxz or args.google_sqrtiswap, quera_gemini=args.quera_gemini, fez=args.fez, ibm_eagle=args.ibm_eagle, ibm_heron=args.ibm_heron, ibm_heron_frac=args.ibm_heron_frac, rigetti_ankaa=args.rigetti_ankaa, iqm_garnet=args.iqm_garnet)
 
     json_results = [] if args.json and multiple else None
 
@@ -2524,8 +2546,8 @@ def main() -> None:
                 phasedx_gate_name="r",
                 xxphase_gate_name="rxx",
             )
-        elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap:
-            gateset_name = "syc" if args.google_sycamore else "sqrtiswap"
+        elif args.sqrtiswap_phxz or args.google_sycamore or args.google_sqrtiswap or args.quera_gemini:
+            gateset_name = "syc" if args.google_sycamore else "cz" if args.quera_gemini else "sqrtiswap"
             _compiled_cirq, selected, _cirq_qasm2 = _compile_cirq(qc, gateset_name=gateset_name)
         elif args.ibm_eagle or args.ibm_heron or args.ibm_heron_frac or args.rigetti_ankaa:
             basis = (
