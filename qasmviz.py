@@ -189,15 +189,11 @@ def sparse_statevector_from_sim(sim, nqubits: int) -> list[tuple[str, complex]]:
     for index, amp in sim:
         amp = complex(amp)
         if abs(amp) > 1e-15:
-            values.append((int(index), amp))
+            values.append((format(index, f"0{nqubits}b")[::-1], amp))
 
     values.sort(key=lambda kv: kv[0])
 
-    return [
-        (format(index, f"0{nqubits}b"), amp)
-        for index, amp in values
-    ]
-
+    return values
 
 def run_circuit_and_capture(circuit) -> tuple[object, list[tuple[str, complex]]]:
     sim = qblaze.Simulator()
