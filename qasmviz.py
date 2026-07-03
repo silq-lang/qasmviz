@@ -133,7 +133,6 @@ def cancel_swaps(circuit):
 
     Works correctly with measurements, barriers, and all other gate types.
     """
-    from qiskit import QuantumCircuit as _QC
 
     qubits = list(circuit.qubits)
     n = len(qubits)
@@ -152,7 +151,7 @@ def cancel_swaps(circuit):
             new_data.append(instr.replace(qubits=new_qubits))
 
     new_data.reverse()
-    qc2 = _QC(*circuit.qregs, *circuit.cregs)
+    qc2 = circuit.copy_empty_like()
     for instr in new_data:
         qc2.append(instr.operation, instr.qubits, instr.clbits)
     return qc2
