@@ -213,19 +213,16 @@ def metric_depth_and_count(
     *,
     is_interesting: Callable[[DAGOpNode], bool],
     node_weight: Callable[[DAGOpNode], int] | None = None,
-    respect_barriers: bool = True,
     dag=None,
 ) -> tuple[int, int]:
     """
     Dependency-aware metric depth/count on the circuit DAG.
 
     The metric depth is the length of the longest dependency-respecting path,
-    counting:
-      - ``node_weight(node)`` for each interesting node (default: 1)
-      - additionally 1 for each barrier node if respect_barriers=True
-
-    Non-interesting, non-barrier nodes propagate the current metric layer
-    without increasing it.
+    counting ``node_weight(node)`` for each interesting node (default: 1).
+    Barriers synchronize the metric layers of their operands through the DAG
+    dependencies, but do not add a layer. Other non-interesting nodes likewise
+    propagate the current metric layer without increasing it.
 
     An already-built DAG may be supplied via ``dag`` to avoid rebuilding it.
     """
@@ -244,11 +241,10 @@ def metric_depth_and_count(
         ]
         base = max((level[pred._node_id] for pred in preds), default=0)
 
-        is_barrier = respect_barriers and node.op.name == "barrier"
-        interesting = is_interesting(node)
+        interesting = node.op.name != "barrier" and is_interesting(node)
 
         weight = (node_weight(node) if node_weight else 1) if interesting else 0
-        here = base + (weight if interesting else (1 if is_barrier else 0))
+        here = base + weight
         level[node._node_id] = here
 
         if interesting:
@@ -262,7 +258,6 @@ def t_metrics(circuit) -> tuple[int, int]:
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=lambda node: node.op.name in {"t", "tdg"},
-        respect_barriers=True,
     )
     return count, depth
 
@@ -271,7 +266,6 @@ def cx_metrics(circuit) -> tuple[int, int]:
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=lambda node: node.op.name == "cx",
-        respect_barriers=True,
     )
     return count, depth
 
@@ -304,7 +298,6 @@ def ecr_metrics(circuit) -> tuple[int, int]:
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=lambda node: node.op.name == "ecr",
-        respect_barriers=True,
     )
     return count, depth
 
@@ -313,7 +306,6 @@ def sx_metrics(circuit) -> tuple[int, int]:
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=lambda node: node.op.name in {"sx", "sxdg"},
-        respect_barriers=True,
     )
     return count, depth
 
@@ -325,7 +317,6 @@ def two_qubit_metrics(circuit) -> tuple[int, int]:
         is_interesting=lambda node: (
             node.op.name not in _NON_GATE_OPS and node.op.num_qubits == 2
         ),
-        respect_barriers=True,
     )
     return count, depth
 
@@ -346,7 +337,7 @@ _CLIFFORD_GATES = {
     # Single-qubit
     "h", "s", "sdg", "x", "y", "z", "sx", "sxdg", "id",
     # Two-qubit
-    "cx", "cy", "cz", "ch", "cs", "csdg", "swap", "iswap", "dcx", "ecr",
+    "cx", "cy", "cz", "swap", "iswap", "dcx", "ecr",
 }
 
 
@@ -457,7 +448,6 @@ def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=is_rotation_collect,
-        respect_barriers=True,
         dag=dag,
     )
 
@@ -471,7 +461,6 @@ def rotation_metrics(circuit) -> tuple[int, int, int, int, dict[int | None, int]
             circuit,
             is_interesting=is_rotation,
             node_weight=t_weight,
-            respect_barriers=True,
             dag=dag,
         )
     else:
@@ -715,7 +704,6 @@ def mcm_metrics(circuit) -> tuple[int, int]:
     depth, count = metric_depth_and_count(
         circuit,
         is_interesting=is_active_measure,
-        respect_barriers=True,
         dag=dag,
     )
     return count, depth
@@ -887,7 +875,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "cz",
-            respect_barriers=True,
         )
         if count:
             data["cz-count"] = count
@@ -896,7 +883,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "iswap",
-            respect_barriers=True,
         )
         if count:
             data["iswap-count"] = count
@@ -905,7 +891,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "rzz",
-            respect_barriers=True,
         )
         if count:
             data["rzz-count"] = count
@@ -914,7 +899,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "rxx",
-            respect_barriers=True,
         )
         if count:
             data["rxx-count"] = count
@@ -928,7 +912,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "cz",
-            respect_barriers=True,
         )
         if count:
             data["cz-count"] = count
@@ -937,7 +920,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "cz",
-            respect_barriers=True,
         )
         if count:
             data["cz-count"] = count
@@ -946,7 +928,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "rxx",
-            respect_barriers=True,
         )
         if count:
             data["rxx-count"] = count
@@ -955,7 +936,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "tk2",
-            respect_barriers=True,
         )
         if count:
             data["tk2-count"] = count
@@ -964,7 +944,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "xxphase",
-            respect_barriers=True,
         )
         if count:
             data["xxphase-count"] = count
@@ -973,7 +952,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "zzphase",
-            respect_barriers=True,
         )
         if count:
             data["zzphase-count"] = count
@@ -982,7 +960,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "ms",
-            respect_barriers=True,
         )
         if count:
             data["ms-count"] = count
@@ -991,7 +968,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "zz",
-            respect_barriers=True,
         )
         if count:
             data["zz-count"] = count
@@ -1000,7 +976,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "syc",
-            respect_barriers=True,
         )
         if count:
             data["syc-count"] = count
@@ -1009,7 +984,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name in {"sqrt_iswap", "sqrt_iswap_inv"},
-            respect_barriers=True,
         )
         if count:
             data["sqrt_iswap-count"] = count
@@ -1018,7 +992,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "cz",
-            respect_barriers=True,
         )
         if count:
             data["cz-count"] = count
@@ -1033,7 +1006,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             depth, count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name in {"cz", "rzz"},
-                respect_barriers=True,
             )
             if count:
                 data["2q-count"] = count
@@ -1042,7 +1014,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             depth, count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "cz",
-                respect_barriers=True,
             )
             if count:
                 data["cz-count"] = count
@@ -1051,7 +1022,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
         depth, count = metric_depth_and_count(
             circuit,
             is_interesting=lambda node: node.op.name == "iswap",
-            respect_barriers=True,
         )
         if count:
             data["iswap-count"] = count
@@ -1070,7 +1040,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             depth, count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == name,
-                respect_barriers=True,
             )
             tqc, tqd = count, depth
             key = name
@@ -1097,34 +1066,29 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name in {"gpi2", "gpi"},
-                respect_barriers=True,
             )
         elif primitive_1q == "prx":
             # IQM Garnet: PRx has no dagger variant; just match "prx".
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "prx",
-                respect_barriers=True,
             )
         elif primitive_1q == "r":
             # AQT: R gate has no dagger variant; just match "r".
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "r",
-                respect_barriers=True,
             )
         elif primitive_1q == "u3":
             # TK2: u3 has no dagger variant; just match "u3".
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "u3",
-                respect_barriers=True,
             )
         else:
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node, _g=primitive_1q: node.op.name in {_g, _g + "dg"},
-                respect_barriers=True,
             )
         # For IBM Eagle/Heron: x costs 2 sx pulses; fold into sx-count (weighted), sx-depth (unified).
         # For IBM Heron frac: report all physical 1Q gates together as 1q-count/1q-depth.
@@ -1132,12 +1096,10 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             xd, xc = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name == "x",
-                respect_barriers=True,
             )
             p1_depth_combined, _ = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name in {"sx", "sxdg", "x"},
-                respect_barriers=True,
             )
             p1_count_combined = p1_count + 2 * xc
             if p1_count_combined:
@@ -1147,7 +1109,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             oneq_depth, oneq_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node: node.op.name in {"rx", "sx", "sxdg", "x"} and node.op.num_qubits == 1,
-                respect_barriers=True,
             )
             if oneq_count:
                 data["1q-count"] = oneq_count
@@ -1171,7 +1132,6 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
             p1_depth, p1_count = metric_depth_and_count(
                 circuit,
                 is_interesting=lambda node, _g=name_1q: node.op.name == _g,
-                respect_barriers=True,
             )
             if p1_count:
                 data[f"{name_1q}-count"] = p1_count

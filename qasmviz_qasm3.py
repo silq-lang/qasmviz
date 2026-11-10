@@ -2,8 +2,7 @@
 
 This is deliberately a source compiler, not a complete OpenQASM type checker or
 interpreter. Classical statements are preserved. Only straight-line unitary
-regions with Qiskit-importable, compile-time parameters and operands are sent
-to Qiskit. See README.md for the supported subset and explicit limitations.
+regions with compile-time parameters and operands are sent to Qiskit.
 """
 
 import copy
@@ -20,6 +19,7 @@ from qiskit_qasm3_import import parse as import_quantum
 from qiskit_qasm3_import.exceptions import ConversionError
 
 from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager
+from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator
 
 
 class SourceCompilationError(ValueError):
@@ -118,11 +118,13 @@ class _Scope:
     qubit_operands: list = field(default_factory=list)
     quantum_names: set = field(default_factory=set)
     classical_names: set = field(default_factory=set)
+    constants: dict = field(default_factory=dict)
 
     def child(self):
         return _Scope(
             list(self.preamble), list(self.qubit_operands),
             set(self.quantum_names), set(self.classical_names),
+            dict(self.constants),
         )
 
 
@@ -146,6 +148,73 @@ class _Compiler:
             qubits_initially_zero=False,
         )
 
+    @staticmethod
+    def expression(node, scope, bound=()):
+        """Fold scalar expressions, except formal gate parameters.
+
+        Constant subexpressions in a gate definition are frozen in its defining
+        scope, before a later call can introduce differently named bindings.
+        """
+        if any(isinstance(child, ast.Identifier) and child.name in bound for child in _nodes(node)):
+            result = copy.deepcopy(node)
+            if isinstance(result, ast.BinaryExpression):
+                result.lhs = _Compiler.expression(result.lhs, scope, bound)
+                result.rhs = _Compiler.expression(result.rhs, scope, bound)
+            elif isinstance(result, ast.UnaryExpression):
+                result.expression = _Compiler.expression(result.expression, scope, bound)
+            elif not isinstance(result, ast.Identifier):
+                raise _error(node, 'this expression with a formal gate parameter is not supported')
+            return result
+        try:
+            value = ConstantEvaluator(scope.constants, scope.classical_names).evaluate(node)
+            if value.kind == 'bool':
+                raise ConstantEvaluationError(node, 'quantum parameters must be numeric constants')
+            return value.literal()
+        except ConstantEvaluationError as exc:
+            raise _error(exc.node, str(exc)) from exc
+
+    @staticmethod
+    def index(node, scope):
+        if isinstance(node, list):
+            return [_Compiler.index(item, scope) for item in node]
+        if isinstance(node, ast.RangeDefinition):
+            return ast.RangeDefinition(*(
+                _Compiler.index(item, scope) if item is not None else None
+                for item in (node.start, node.end, node.step)
+            ))
+        if isinstance(node, ast.DiscreteSet):
+            return ast.DiscreteSet([_Compiler.index(item, scope) for item in node.values])
+        try:
+            return ast.IntegerLiteral(ConstantEvaluator(scope.constants, scope.classical_names).integer(node))
+        except ConstantEvaluationError as exc:
+            raise _error(exc.node, str(exc)) from exc
+
+    @staticmethod
+    def operand(node, scope):
+        result = copy.deepcopy(node)
+        if isinstance(result, ast.IndexedIdentifier):
+            result.indices = _Compiler.index(result.indices, scope)
+        elif isinstance(result, ast.IndexExpression):
+            result.collection = _Compiler.operand(result.collection, scope)
+            result.index = _Compiler.index(result.index, scope)
+        elif isinstance(result, ast.Concatenation):
+            result.lhs = _Compiler.operand(result.lhs, scope)
+            result.rhs = _Compiler.operand(result.rhs, scope)
+        return result
+
+    @staticmethod
+    def quantum_statement(statement, scope, bound=()):
+        result = copy.deepcopy(statement)
+        if isinstance(result, ast.QuantumGate):
+            result.arguments = [_Compiler.expression(arg, scope, bound) for arg in result.arguments]
+        elif isinstance(result, ast.QuantumPhase):
+            result.argument = _Compiler.expression(result.argument, scope, bound)
+        for modifier in getattr(result, 'modifiers', ()):
+            if modifier.argument is not None:
+                modifier.argument = _Compiler.expression(modifier.argument, scope, bound)
+        result.qubits = [_Compiler.operand(qubit, scope) for qubit in result.qubits]
+        return result
+
     def preflight(self, program):
         for node in _nodes(program):
             if getattr(node, "annotations", None):
@@ -163,15 +232,22 @@ class _Compiler:
                 raise _error(node, "physical qubits are not yet supported by source Clifford+T compilation")
 
     def add_qubits(self, statement, scope):
+        folded = copy.deepcopy(statement)
+        if folded.size is not None:
+            folded.size = self.index(folded.size, scope)
+            if folded.size.value < 1:
+                raise _error(statement, 'qubit size must be a positive integer constant')
+            if self.width is not None and len(scope.qubit_operands) + folded.size.value > self.width:
+                raise _error(statement, f'circuit has more qubits than --width {self.width}')
         try:
-            circuit = import_quantum(openqasm3.dumps(ast.Program([statement], version="3.0")))
+            circuit = import_quantum(openqasm3.dumps(ast.Program([folded], version="3.0")))
         except (ConversionError, QiskitError) as exc:
             raise _error(statement, f"qubit sizes must be compile-time expressions supported by Qiskit: {exc}") from exc
         name = statement.qubit.name
         if name in scope.quantum_names or name in scope.classical_names:
             raise _error(statement, f"duplicate declaration of {name!r}")
         scope.quantum_names.add(name)
-        scope.preamble.append(statement)
+        scope.preamble.append(folded)
         if statement.size is None:
             scope.qubit_operands.append(ast.Identifier(name))
         else:
@@ -188,13 +264,14 @@ class _Compiler:
         if not any(isinstance(node, ast.Include) and node.filename == "stdgates.inc"
                    for node in scope.preamble):
             raise _error(region[0], 'source Clifford+T compilation requires include "stdgates.inc"')
-        for node in _nodes(region):
+        folded = [self.quantum_statement(statement, scope) for statement in region]
+        for node in _nodes(folded):
             if isinstance(node, ast.FloatLiteral) and not math.isfinite(node.value):
                 raise _error(node, "quantum parameters must be finite")
             if isinstance(node, ast.Identifier) and node.name in scope.classical_names:
                 raise _error(node, f"{node.name!r} in a quantum operation requires classical evaluation; "
                              "use literal parameters and static qubit indices for this initial compiler")
-        source = openqasm3.dumps(ast.Program(scope.preamble + region, version="3.0"))
+        source = openqasm3.dumps(ast.Program(scope.preamble + folded, version="3.0"))
         try:
             original = import_quantum(source)
             if original.num_qubits != len(scope.qubit_operands):
@@ -295,7 +372,10 @@ class _Compiler:
                     raise _error(statement, "qubit declarations must be at global scope")
                 self.add_qubits(statement, scope)
             elif isinstance(statement, ast.QuantumGateDefinition):
-                scope.preamble.append(statement)
+                definition = copy.deepcopy(statement)
+                bound = {arg.name for arg in definition.arguments + definition.qubits}
+                definition.body = [self.quantum_statement(item, scope, bound) for item in definition.body]
+                scope.preamble.append(definition)
                 # All calls are lowered in place. Keeping the original definition
                 # could leave unused non-Clifford gates in the emitted program.
                 if self.editor is not None:
@@ -306,16 +386,37 @@ class _Compiler:
                 if _quantum_alias(statement.value, scope.quantum_names):
                     if name in scope.quantum_names:
                         raise _error(statement, "shadowing a quantum name with an alias is not yet supported")
-                    scope.preamble.append(statement)
+                    alias = copy.deepcopy(statement)
+                    alias.value = self.operand(alias.value, scope)
+                    scope.preamble.append(alias)
                     scope.quantum_names.add(name)
                     scope.classical_names.discard(name)
                 else:
                     scope.classical_names.add(name)
                     scope.quantum_names.discard(name)
-            elif isinstance(statement, (ast.ClassicalDeclaration, ast.ConstantDeclaration, ast.IODeclaration)):
+                scope.constants.pop(name, None)
+            elif isinstance(statement, ast.ConstantDeclaration):
+                name = statement.identifier.name
+                evaluator = ConstantEvaluator(scope.constants, scope.classical_names)
+                try:
+                    value = evaluator.evaluate(statement.init_expression)
+                    value = evaluator.cast(statement.type, value)
+                except ConstantEvaluationError as exc:
+                    # Preserve unsupported classical constants unless a quantum
+                    # expression actually needs their values.
+                    value = exc
+                scope.constants[name] = value
+                scope.classical_names.add(name)
+                scope.quantum_names.discard(name)
+            elif isinstance(statement, (ast.ClassicalDeclaration, ast.IODeclaration)):
                 name = statement.identifier.name
                 scope.classical_names.add(name)
                 scope.quantum_names.discard(name)
+                scope.constants.pop(name, None)
+            elif isinstance(statement, (ast.SubroutineDefinition, ast.ExternDeclaration)):
+                name = statement.name.name
+                scope.classical_names.add(name)
+                scope.constants.pop(name, None)
             elif isinstance(statement, ast.BranchingStatement):
                 statement.if_block = self.block(statement.if_block, scope.child(), scope_body=True)
                 statement.else_block = self.block(statement.else_block, scope.child(), scope_body=True)
@@ -324,6 +425,7 @@ class _Compiler:
                 if isinstance(statement, ast.ForInLoop):
                     child.classical_names.add(statement.identifier.name)
                     child.quantum_names.discard(statement.identifier.name)
+                    child.constants.pop(statement.identifier.name, None)
                 statement.block = self.block(statement.block, child, scope_body=True)
             elif isinstance(statement, ast.SwitchStatement):
                 for _, case in statement.cases:
