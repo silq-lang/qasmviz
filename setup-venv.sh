@@ -19,7 +19,8 @@ python -m pip install --upgrade pip setuptools wheel
 echo "Installing dependencies"
 python -m pip install \
   'qiskit>=2.5,<3' \
-  qiskit-qasm3-import \
+  'qiskit-qasm3-import>=0.6,<0.7' \
+  'openqasm3[parser]>=1.0.1,<2' \
   qiskit-ibm-runtime \
   qiskit-aer \
   cirq ply \

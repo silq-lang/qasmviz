@@ -13,7 +13,7 @@ import math
 import cmath
 import argparse
 
-from qiskit_qasm3_import import parse
+from qiskit_qasm3_import import convert, parse
 from qiskit_ibm_runtime.fake_provider import FakeFez
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
@@ -2475,11 +2475,44 @@ def main() -> None:
             source = filename or "stdin"
             raise SystemExit(f"No OpenQASM code in {source}.")
 
+        if args.clifford_t and not qasm3_code.lstrip().startswith("OPENQASM 2"):
+            import openqasm3
+            from openqasm3.parser import QASM3ParsingError
+            from qasmviz_qasm3 import (
+                SourceCompilationError, compile_clifford_t_source, needs_source_compilation,
+            )
+
+            source = filename or "stdin"
+            try:
+                program = openqasm3.parse(qasm3_code)
+            except QASM3ParsingError as exc:
+                raise SystemExit(f"{source}: invalid OpenQASM 3: {exc}") from exc
+            if needs_source_compilation(program):
+                if not args.dump or any((args.dump2, args.show, args.run, args.cost, args.json)):
+                    raise SystemExit(
+                        f"{source}: Clifford+T compilation preserving classical computations "
+                        "currently supports --dump only; omit --show, --run, --cost, --json and --dump2."
+                    )
+                try:
+                    compiled = compile_clifford_t_source(
+                        qasm3_code, program=program,
+                        optimization_level=args.opt_level, epsilon=args.eps, width=args.width,
+                    )
+                except SourceCompilationError as exc:
+                    raise SystemExit(f"{source}:{exc}") from exc
+                if multiple:
+                    if file_idx > 0:
+                        print()
+                    print(f"### {filename}")
+                print(compiled, end="")
+                continue
+
         if qasm3_code.lstrip().startswith("OPENQASM 2"):
             from qiskit import qasm2 as _qasm2_mod
             qc = _qasm2_mod.loads(qasm3_code)
         else:
-            qc = parse(qasm3_code)
+            # Reuse the AST already parsed for Clifford+T path selection.
+            qc = convert(program) if args.clifford_t else parse(qasm3_code)
 
         if not args.no_cancel_swaps:
             qc = cancel_swaps(qc)
