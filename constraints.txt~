@@ -1,0 +1,8 @@
+# Versions exercised by the Python regression suite. Other optional backends
+# retain their own dependency requirements.
+qiskit==2.5.0
+qiskit-qasm3-import==0.6.0
+openqasm3==1.0.1
+antlr4-python3-runtime==4.13.2
+qblaze==0.1.0
+qiskit-ibm-runtime==0.52.0

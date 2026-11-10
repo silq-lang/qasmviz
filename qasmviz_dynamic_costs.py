@@ -209,8 +209,8 @@ class Analyzer:
 
     @staticmethod
     def call_exit(flow, expression):
-        # A classical call may terminate the program or fail to return. There
-        # are no quantum subroutines in this compiler's accepted input subset.
+        # A classical call may terminate the program or fail to return.
+        # Quantum subroutines have already been inlined by source compilation.
         if any(isinstance(node, ast.FunctionCall) for node in nodes(expression)):
             merge(flow, 'stop', {})
         return flow

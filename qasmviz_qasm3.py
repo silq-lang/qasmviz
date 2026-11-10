@@ -21,6 +21,9 @@ from qiskit_qasm3_import.exceptions import ConversionError
 from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager
 from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator
 from qasmviz_loops import Iterations, iterations, writes_name
+from qasmviz_inline import (
+    DEFAULT_MAX_INLINE_STATEMENTS, InliningError, inline_subroutines, quantum_definitions,
+)
 
 
 DEFAULT_MAX_LOOP_VARIANTS = 256
@@ -52,13 +55,18 @@ class _SourceEditor:
         return (self.lines[first.span.start_line - 1] + first.span.start_column,
                 self.lines[last.span.end_line - 1] + last.span.end_column + 1)
 
-    def replace(self, region, replacement, *, scope_body=False):
+    @staticmethod
+    def lexer_symbol(token_type):
+        return qasm3Lexer.symbolicNames[token_type]
+
+    def replace(self, region, replacement, *, scope_body=False, printer=None):
         start, end = self.bounds(region[0], region[-1])
         previous = bisect_left(self.starts, start) - 1
         unbraced = scope_body and previous >= 0 and self.tokens[previous].text != "{"
         line = self.source[self.lines[region[0].span.start_line - 1]:start]
         indent = line[:len(line) - len(line.lstrip(" \t"))]
-        lines = openqasm3.dumps(ast.Program(replacement)).rstrip().splitlines()
+        text = printer(replacement) if printer else openqasm3.dumps(ast.Program(replacement)).rstrip()
+        lines = text.splitlines()
         if unbraced:
             # if (b) x q; must become if (b) { h q; s q; s q; h q; }.
             text = "{\n" + "".join(indent + "  " + line + "\n" for line in lines) + indent + "}"
@@ -226,7 +234,8 @@ class _Compiler:
         result.qubits = [_Compiler.operand(qubit, scope) for qubit in result.qubits]
         return result
 
-    def preflight(self, program):
+    @staticmethod
+    def preflight(program):
         for node in _nodes(program):
             if getattr(node, "annotations", None):
                 raise _error(node, "annotations are not supported by source Clifford+T compilation")
@@ -235,10 +244,6 @@ class _Compiler:
                 raise _error(node, "calibrations, boxes and durationof need a target timing model")
             if isinstance(node, ast.Include) and node.filename != "stdgates.inc":
                 raise _error(node, "source Clifford+T compilation supports only stdgates.inc includes")
-            if isinstance(node, ast.SubroutineDefinition):
-                quantum = (ast.QuantumStatement, ast.QuantumMeasurement, ast.QuantumArgument)
-                if any(isinstance(child, quantum) for child in _nodes(node)):
-                    raise _error(node, "quantum subroutines are not yet supported; inline the subroutine")
             if isinstance(node, ast.Identifier) and node.name.startswith("$"):
                 raise _error(node, "physical qubits are not yet supported by source Clifford+T compilation")
 
@@ -507,33 +512,62 @@ class _Compiler:
 
 
 def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, width=None,
-                            max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
+                            max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS,
+                            max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS):
     """Return a new AST; never mutate the caller's parsed program.
 
     Width is an upper bound. This path does not allocate clean ancillas: a qubit
     entering a region may be live or entangled, even if it is unused locally.
     """
-    compiler = _Compiler(optimization_level, epsilon, width, max_loop_variants=max_loop_variants)
-    compiler.preflight(program)
-    result = copy.deepcopy(program)
-    result.statements = compiler.block(result.statements, _Scope(), global_scope=True)
-    result.version = result.version or "3.0"
-    return result
+    if max_inline_statements < 1:
+        raise ValueError('max_inline_statements must be positive')
+    if not quantum_definitions(program):
+        compiler = _Compiler(optimization_level, epsilon, width, max_loop_variants=max_loop_variants)
+        compiler.preflight(program)
+        result = copy.deepcopy(program)
+        result.statements = compiler.block(result.statements, _Scope(), global_scope=True)
+        result.version = result.version or '3.0'
+        return result
+    if any(isinstance(node, (ast.FloatLiteral, ast.ImaginaryLiteral, ast.DurationLiteral))
+           and not math.isfinite(node.value) for node in _nodes(program)):
+        raise SourceCompilationError('AST contains a non-finite floating literal; use the source API '
+                                     'to retain the spelling of high-precision classical literals')
+    return compile_clifford_t_source_with_ast(
+        openqasm3.dumps(program), optimization_level=optimization_level, epsilon=epsilon,
+        width=width, max_loop_variants=max_loop_variants,
+        max_inline_statements=max_inline_statements,
+    )[1]
 
 
 def compile_clifford_t_source_with_ast(source, *, program=None, optimization_level=3, epsilon=None,
-                                      width=None, max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
+                                      width=None, max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS,
+                                      max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS):
     """Transform source text without reprinting its classical statements.
 
     The optional program must be the unmodified AST parsed from this source;
     it lets the CLI avoid parsing twice when selecting a compilation path.
     """
     program = openqasm3.parse(source) if program is None else program
+    _Compiler.preflight(program)
     editor = _SourceEditor(source)
+    try:
+        source, program, expanded = inline_subroutines(
+            source, program, editor, max_inline_statements=max_inline_statements, width=width,
+        )
+    except InliningError as exc:
+        raise SourceCompilationError(str(exc)) from exc
+    if expanded:
+        editor = _SourceEditor(source)
     compiler = _Compiler(optimization_level, epsilon, width, editor, max_loop_variants)
-    compiler.preflight(program)
-    compiled = copy.deepcopy(program)
-    compiled.statements = compiler.block(compiled.statements, _Scope(), global_scope=True)
+    try:
+        if expanded:
+            compiler.preflight(program)
+        compiled = copy.deepcopy(program)
+        compiled.statements = compiler.block(compiled.statements, _Scope(), global_scope=True)
+    except SourceCompilationError as exc:
+        if expanded:
+            raise SourceCompilationError('expanded subroutine source: ' + str(exc)) from exc
+        raise
     compiled.version = compiled.version or '3.0'
     return editor.finish(program.version), compiled
 

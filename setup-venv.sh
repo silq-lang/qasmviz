@@ -18,6 +18,7 @@ python -m pip install --upgrade pip setuptools wheel
 
 echo "Installing dependencies"
 python -m pip install \
+  -c "$(dirname "${BASH_SOURCE[0]}")/constraints.txt" \
   'qiskit>=2.5,<3' \
   'qiskit-qasm3-import>=0.6,<0.7' \
   'openqasm3[parser]>=1.0.1,<2' \

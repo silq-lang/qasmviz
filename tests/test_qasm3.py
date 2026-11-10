@@ -249,7 +249,6 @@ class SourceCompilerTests(unittest.TestCase):
             ('qubit q; if(true) { int q=1; x q; }', 'classical evaluation'),
             ('qubit[1] q; let a=q; if(true) { int q=1; x a; }', 'shadows a qubit'),
             ('qubit q; if(true) { int h=1; x q; }', 'shadows an emitted basis gate'),
-            ('qubit q; def f(qubit p) { x p; } f(q);', 'quantum subroutines'),
             ('qubit q; box[1us] { x q; }', 'timing model'),
             ('qubit q; duration d=durationof({x q;});', 'timing model'),
             ('defcalgrammar "openpulse"; cal { }', 'timing model'),
