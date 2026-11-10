@@ -20,6 +20,10 @@ from qiskit_qasm3_import.exceptions import ConversionError
 
 from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager
 from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator
+from qasmviz_loops import Iterations, iterations, writes_name
+
+
+DEFAULT_MAX_LOOP_VARIANTS = 256
 
 
 class SourceCompilationError(ValueError):
@@ -119,12 +123,14 @@ class _Scope:
     quantum_names: set = field(default_factory=set)
     classical_names: set = field(default_factory=set)
     constants: dict = field(default_factory=dict)
+    loops: dict = field(default_factory=dict)
 
     def child(self):
         return _Scope(
             list(self.preamble), list(self.qubit_operands),
             set(self.quantum_names), set(self.classical_names),
             dict(self.constants),
+            dict(self.loops),
         )
 
 
@@ -139,9 +145,14 @@ def _quantum_alias(expression, names):
 
 
 class _Compiler:
-    def __init__(self, optimization_level, epsilon, width, editor=None):
+    def __init__(self, optimization_level, epsilon, width, editor=None,
+                 max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
+        if max_loop_variants < 1:
+            raise ValueError('max_loop_variants must be positive')
         self.width = width
         self.editor = editor
+        self.max_loop_variants = max_loop_variants
+        self.generated_variants = 0
         self.pm = clifford_t_pass_manager(
             optimization_level=optimization_level,
             epsilon=epsilon,
@@ -261,6 +272,48 @@ class _Compiler:
     def compile_region(self, region, scope):
         if not region:
             return []
+        if any(isinstance(space, Iterations) and space.count == 0 for space in scope.loops.values()):
+            return []
+        used = {node.name for node in _nodes(region) if isinstance(node, ast.Identifier)}
+        used = [name for name in scope.loops if name in used]
+        if used:
+            total = 1
+            for name in used:
+                space = scope.loops[name]
+                if isinstance(space, ConstantEvaluationError):
+                    raise _error(region[0], f'cannot specialize loop variable {name!r}: {space}')
+                total *= space.count
+            if self.generated_variants + total > self.max_loop_variants:
+                raise _error(region[0], 'loop specialization exceeds --max-loop-variants '
+                             f'{self.max_loop_variants}; use a smaller loop or raise the limit')
+            self.generated_variants += total
+
+            def specialize(names, current):
+                if not names:
+                    return self.compile_region(region, current)
+                name, *rest = names
+                space = current.loops[name]
+                values = dict.fromkeys(space.at(index) for index in range(space.count))
+                cases = []
+                for value in values:
+                    child = current.child()
+                    child.loops.pop(name)
+                    child.constants[name] = value
+                    cases.append((value, specialize(rest, child)))
+                # Balanced dispatch avoids deep ASTs and linear predicate cost
+                # when the user raises the expansion limit.
+                def dispatch(items):
+                    if len(items) == 1:
+                        return items[0][1]
+                    middle = len(items) // 2
+                    op = '==' if len(items) == 2 else '<='
+                    condition = ast.BinaryExpression(ast.BinaryOperator[op], ast.Identifier(name),
+                                                     items[middle - 1][0].literal())
+                    return [ast.BranchingStatement(condition, dispatch(items[:middle]), dispatch(items[middle:]))]
+
+                return dispatch(sorted(cases, key=lambda case: case[0].value))
+
+            return specialize(used, scope)
         if not any(isinstance(node, ast.Include) and node.filename == "stdgates.inc"
                    for node in scope.preamble):
             raise _error(region[0], 'source Clifford+T compilation requires include "stdgates.inc"')
@@ -395,6 +448,7 @@ class _Compiler:
                     scope.classical_names.add(name)
                     scope.quantum_names.discard(name)
                 scope.constants.pop(name, None)
+                scope.loops.pop(name, None)
             elif isinstance(statement, ast.ConstantDeclaration):
                 name = statement.identifier.name
                 evaluator = ConstantEvaluator(scope.constants, scope.classical_names)
@@ -408,24 +462,35 @@ class _Compiler:
                 scope.constants[name] = value
                 scope.classical_names.add(name)
                 scope.quantum_names.discard(name)
+                scope.loops.pop(name, None)
             elif isinstance(statement, (ast.ClassicalDeclaration, ast.IODeclaration)):
                 name = statement.identifier.name
                 scope.classical_names.add(name)
                 scope.quantum_names.discard(name)
                 scope.constants.pop(name, None)
+                scope.loops.pop(name, None)
             elif isinstance(statement, (ast.SubroutineDefinition, ast.ExternDeclaration)):
                 name = statement.name.name
                 scope.classical_names.add(name)
                 scope.constants.pop(name, None)
+                scope.loops.pop(name, None)
             elif isinstance(statement, ast.BranchingStatement):
                 statement.if_block = self.block(statement.if_block, scope.child(), scope_body=True)
                 statement.else_block = self.block(statement.else_block, scope.child(), scope_body=True)
             elif isinstance(statement, (ast.WhileLoop, ast.ForInLoop)):
                 child = scope.child()
                 if isinstance(statement, ast.ForInLoop):
-                    child.classical_names.add(statement.identifier.name)
-                    child.quantum_names.discard(statement.identifier.name)
-                    child.constants.pop(statement.identifier.name, None)
+                    name = statement.identifier.name
+                    try:
+                        space = iterations(statement, scope.constants, scope.classical_names)
+                        if writes_name(statement.block, name):
+                            raise ConstantEvaluationError(statement, 'the iterator is modified in the loop body')
+                    except ConstantEvaluationError as exc:
+                        space = exc
+                    child.loops[name] = space
+                    child.classical_names.add(name)
+                    child.quantum_names.discard(name)
+                    child.constants.pop(name, None)
                 statement.block = self.block(statement.block, child, scope_body=True)
             elif isinstance(statement, ast.SwitchStatement):
                 for _, case in statement.cases:
@@ -441,13 +506,14 @@ class _Compiler:
         return result
 
 
-def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, width=None):
+def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, width=None,
+                            max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
     """Return a new AST; never mutate the caller's parsed program.
 
     Width is an upper bound. This path does not allocate clean ancillas: a qubit
     entering a region may be live or entangled, even if it is unused locally.
     """
-    compiler = _Compiler(optimization_level, epsilon, width)
+    compiler = _Compiler(optimization_level, epsilon, width, max_loop_variants=max_loop_variants)
     compiler.preflight(program)
     result = copy.deepcopy(program)
     result.statements = compiler.block(result.statements, _Scope(), global_scope=True)
@@ -455,7 +521,8 @@ def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, wid
     return result
 
 
-def compile_clifford_t_source(source, *, program=None, optimization_level=3, epsilon=None, width=None):
+def compile_clifford_t_source_with_ast(source, *, program=None, optimization_level=3, epsilon=None,
+                                      width=None, max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
     """Transform source text without reprinting its classical statements.
 
     The optional program must be the unmodified AST parsed from this source;
@@ -463,7 +530,14 @@ def compile_clifford_t_source(source, *, program=None, optimization_level=3, eps
     """
     program = openqasm3.parse(source) if program is None else program
     editor = _SourceEditor(source)
-    compiler = _Compiler(optimization_level, epsilon, width, editor)
+    compiler = _Compiler(optimization_level, epsilon, width, editor, max_loop_variants)
     compiler.preflight(program)
-    compiler.block(copy.deepcopy(program.statements), _Scope(), global_scope=True)
-    return editor.finish(program.version)
+    compiled = copy.deepcopy(program)
+    compiled.statements = compiler.block(compiled.statements, _Scope(), global_scope=True)
+    compiled.version = compiled.version or '3.0'
+    return editor.finish(program.version), compiled
+
+
+def compile_clifford_t_source(source, **kwargs):
+    """Return compiled source, retaining the spelling of classical statements."""
+    return compile_clifford_t_source_with_ast(source, **kwargs)[0]

@@ -195,7 +195,7 @@ const duration time = 3ns;
 
     def test_mutable_bindings_and_loop_variables_mask_constants(self):
         for body in ('if (true) { float a=0.5; rz(a) q; }',
-                     'for int a in [0:1] { rz(a) q; }'):
+                     'int n=1; for int a in [0:n] { rz(a) q; }'):
             with self.subTest(body=body), self.assertRaisesRegex(SourceCompilationError, 'classical evaluation'):
                 compile_clifford_t_source(HEADER + 'const float a=pi; qubit q; ' + body)
 

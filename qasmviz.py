@@ -2333,6 +2333,13 @@ def main() -> None:
         help="maximum qubit width available, including ancillas. The optimizer may use extra qubits up to this limit to reduce gate count or depth.",
     )
     transpile_group.add_argument(
+        "--max-loop-variants",
+        type=int,
+        default=None,
+        metavar="N",
+        help="maximum quantum block variants generated for bounded loops (default: 256). Requires --clifford-t.",
+    )
+    transpile_group.add_argument(
         "--no-cancel-swaps",
         action="store_true",
         dest="no_cancel_swaps",
@@ -2406,6 +2413,11 @@ def main() -> None:
         parser.error(str(exc))
     if args.width is not None and args.width < 1:
         parser.error("--width must be at least 1")
+    if args.max_loop_variants is not None:
+        if not args.clifford_t:
+            parser.error("--max-loop-variants requires --clifford-t")
+        if args.max_loop_variants < 1:
+            parser.error("--max-loop-variants must be positive")
     if args.width is not None and args.fez:
         parser.error("--width cannot be used with --fez")
     if args.json and args.show:
@@ -2439,7 +2451,8 @@ def main() -> None:
             import openqasm3
             from openqasm3.parser import QASM3ParsingError
             from qasmviz_qasm3 import (
-                SourceCompilationError, compile_clifford_t_source, needs_source_compilation,
+                DEFAULT_MAX_LOOP_VARIANTS, SourceCompilationError,
+                compile_clifford_t_source_with_ast, needs_source_compilation,
             )
 
             source = filename or "stdin"
@@ -2448,23 +2461,40 @@ def main() -> None:
             except QASM3ParsingError as exc:
                 raise SystemExit(f"{source}: invalid OpenQASM 3: {exc}") from exc
             if needs_source_compilation(program):
-                if not args.dump or any((args.dump2, args.show, args.run, args.cost, args.json)):
+                if any((args.dump2, args.show, args.run)):
                     raise SystemExit(
                         f"{source}: Clifford+T compilation preserving classical computations "
-                        "currently supports --dump only; omit --show, --run, --cost, --json and --dump2."
+                        "supports --dump, --cost and --json; omit --show, --run and --dump2."
                     )
                 try:
-                    compiled = compile_clifford_t_source(
+                    compiled, compiled_program = compile_clifford_t_source_with_ast(
                         qasm3_code, program=program,
                         optimization_level=args.opt_level, epsilon=args.eps, width=args.width,
+                        max_loop_variants=(args.max_loop_variants if args.max_loop_variants is not None
+                                           else DEFAULT_MAX_LOOP_VARIANTS),
                     )
                 except SourceCompilationError as exc:
                     raise SystemExit(f"{source}:{exc}") from exc
-                if multiple:
+                if multiple and not args.json:
                     if file_idx > 0:
                         print()
                     print(f"### {filename}")
-                print(compiled, end="")
+                if args.dump:
+                    print(compiled, end="")
+                if args.json or ((args.cost or not args.dump) and not args.no_cost):
+                    from qasmviz_dynamic_costs import collect_dynamic_costs, print_dynamic_costs
+                    costs = collect_dynamic_costs(compiled_program)
+                    if args.json:
+                        if multiple:
+                            costs['file'] = filename
+                            json_results.append(costs)
+                        else:
+                            import json
+                            print(json.dumps(costs, indent=2))
+                    else:
+                        if args.dump:
+                            print()
+                        print_dynamic_costs(costs)
                 continue
 
         if qasm3_code.lstrip().startswith("OPENQASM 2"):

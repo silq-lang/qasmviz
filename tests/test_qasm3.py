@@ -246,7 +246,6 @@ class SourceCompilerTests(unittest.TestCase):
     def test_unsupported_constructs_fail_explicitly(self):
         cases = [
             ('qubit q; float[64] a=0.2; rz(a) q;', 'classical evaluation'),
-            ('qubit[2] q; for int i in [0:1] { x q[i]; }', 'static qubit indices'),
             ('qubit q; if(true) { int q=1; x q; }', 'classical evaluation'),
             ('qubit[1] q; let a=q; if(true) { int q=1; x a; }', 'shadows a qubit'),
             ('qubit q; if(true) { int h=1; x q; }', 'shadows an emitted basis gate'),
@@ -330,11 +329,11 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn('if(b)', result.stdout)
 
     def test_unsupported_outputs_are_actionable(self):
-        for option in ('--cost', '--run', '--show', '--dump2'):
+        for option in ('--run', '--show', '--dump2'):
             with self.subTest(option=option):
                 result = self.cli('--clifford-t', '--dump', option)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn('supports --dump only', result.stderr)
+                self.assertIn('supports --dump, --cost and --json', result.stderr)
                 self.assertEqual(result.stdout, '')
                 self.assertNotIn('Traceback', result.stderr)
 
