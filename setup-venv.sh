@@ -18,7 +18,7 @@ python -m pip install --upgrade pip setuptools wheel
 
 echo "Installing dependencies"
 python -m pip install \
-  qiskit \
+  'qiskit>=2.5,<3' \
   qiskit-qasm3-import \
   qiskit-ibm-runtime \
   qiskit-aer \

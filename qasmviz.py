@@ -17,11 +17,12 @@ from qiskit_qasm3_import import parse
 from qiskit_ibm_runtime.fake_provider import FakeFez
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
+from qasmviz_clifford_t import clifford_t_pass_manager, validate_epsilon
+
 import qblaze
 import qblaze.qiskit
 
 
-CLIFFORD_T_BASIS = ["cx", "h", "s", "sdg", "t", "tdg"]
 CX_U_BASIS = ["cx", "u"]
 CX_SX_BASIS = ["rz", "sx", "cx"]
 ECR_SX_BASIS = ["rz", "sx", "ecr"]
@@ -2361,7 +2362,8 @@ def main() -> None:
     transpile_group.add_argument(
         "--eps",
         type=float,
-        help="maximum allowed approximation error for Clifford+T synthesis. Requires `--clifford-t`.",
+        help=("maximum approximation error per synthesized RZ rotation, not a whole-program "
+              "bound. Requires `--clifford-t`. Default: 1e-10; 0 also uses the default."),
     )
     transpile_group.add_argument(
         "--width",
@@ -2438,10 +2440,10 @@ def main() -> None:
 
     if args.eps is not None and not args.clifford_t:
         parser.error("--eps requires --clifford-t")
-    if args.eps is not None and args.eps < 0:
-        parser.error("--eps must be non-negative")
-    if args.eps == 0:
-        args.eps = None
+    try:
+        validate_epsilon(args.eps)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.width is not None and args.width < 1:
         parser.error("--width must be at least 1")
     if args.width is not None and args.fez:
@@ -2513,17 +2515,11 @@ def main() -> None:
         elif args.tk2:
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket_tk2(qc)
         elif args.clifford_t:
-            pm_kwargs = dict(
+            pm = clifford_t_pass_manager(
                 optimization_level=args.opt_level,
-                basis_gates=CLIFFORD_T_BASIS,
-                seed_transpiler=777,
+                epsilon=args.eps,
+                hls_config=hls_config,
             )
-            if args.eps is not None:
-                pm_kwargs["unitary_synthesis_method"] = "gridsynth"
-                pm_kwargs["unitary_synthesis_plugin_config"] = {"epsilon": args.eps}
-            if hls_config is not None:
-                pm_kwargs["hls_config"] = hls_config
-            pm = generate_preset_pass_manager(**pm_kwargs)
             selected = pm.run(qc)
         elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rx or args.rxx_rx or args.cx_rx or args.cz_rx:
             basis = (
