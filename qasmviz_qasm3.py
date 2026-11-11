@@ -19,6 +19,8 @@ from qiskit_qasm3_import import parse as import_quantum
 from qiskit_qasm3_import.exceptions import ConversionError
 
 from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager
+from qasmviz_basis import clifford_decomposition, validate_clifford_basis
+from qasmviz_clifford_qasm import clifford_definitions
 from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator
 from qasmviz_loops import Iterations, iterations, writes_name
 from qasmviz_inline import (
@@ -154,18 +156,34 @@ def _quantum_alias(expression, names):
 
 class _Compiler:
     def __init__(self, optimization_level, epsilon, width, editor=None,
-                 max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS):
+                 max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS, basis_gates=None):
         if max_loop_variants < 1:
             raise ValueError('max_loop_variants must be positive')
         self.width = width
         self.editor = editor
         self.max_loop_variants = max_loop_variants
         self.generated_variants = 0
+        self.basis = tuple(CLIFFORD_T_BASIS) if basis_gates is None else validate_clifford_basis(basis_gates)
+        self.used_gates = set()
         self.pm = clifford_t_pass_manager(
             optimization_level=optimization_level,
             epsilon=epsilon,
             qubits_initially_zero=False,
+            basis_gates=basis_gates,
         )
+
+    def add_definitions(self, program):
+        definitions = clifford_definitions(self.used_gates)
+        if not definitions:
+            return
+        for index, statement in enumerate(program.statements):
+            if isinstance(statement, ast.Include) and statement.filename == 'stdgates.inc':
+                program.statements[index + 1:index + 1] = definitions
+                if self.editor is not None:
+                    _, end = self.editor.bounds(statement, statement)
+                    self.editor.edits.append((end, end, '\n' + openqasm3.dumps(ast.Program(definitions))))
+                return
+        raise SourceCompilationError('extended Clifford gates require include "stdgates.inc"')
 
     @staticmethod
     def expression(node, scope, bound=()):
@@ -346,8 +364,7 @@ class _Compiler:
                          f"compile-time expressions supported by Qiskit): {exc}") from exc
         return self.emit_region(compiled, scope, region[0])
 
-    @staticmethod
-    def emit_region(circuit, scope, source_node):
+    def emit_region(self, circuit, scope, source_node):
         """Emit primitives, retaining phase and restoring logical wire order.
 
         ElidePermutations can remove SWAPs even with qubits_initially_zero=False.
@@ -380,13 +397,14 @@ class _Compiler:
             result.append(ast.QuantumGate(
                 [], ast.Identifier(name), [], [copy.deepcopy(operands[i]) for i in indices]
             ))
+            self.used_gates.add(name)
 
         phase = float(circuit.global_phase)
         if phase != 0:
             result.append(ast.QuantumPhase([], ast.FloatLiteral(phase), []))
         for instruction in circuit.data:
             operation = instruction.operation
-            if operation.name not in CLIFFORD_T_BASIS or operation.params or instruction.clbits:
+            if operation.name not in self.basis or operation.params or instruction.clbits:
                 raise _error(source_node, f"backend left unsupported operation {operation.name!r}")
             gate(operation.name, [physical_to_source[circuit.find_bit(bit).index]
                                   for bit in instruction.qubits])
@@ -400,9 +418,19 @@ class _Compiler:
             if position == logical:
                 continue
             # Restore a SWAP using only the advertised Clifford+T basis.
-            gate("cx", [logical, position])
-            gate("cx", [position, logical])
-            gate("cx", [logical, position])
+            if 'swap' in self.basis:
+                gate('swap', [logical, position])
+            elif 'cx' in self.basis:
+                gate('cx', [logical, position])
+                gate('cx', [position, logical])
+                gate('cx', [logical, position])
+            else:
+                swap = clifford_decomposition('swap', self.basis)
+                if float(swap.global_phase):
+                    result.append(ast.QuantumPhase([], ast.FloatLiteral(float(swap.global_phase)), []))
+                for instruction in swap.data:
+                    gate(instruction.operation.name,
+                         [[logical, position][swap.find_bit(q).index] for q in instruction.qubits])
             displaced = occupants[logical]
             positions[logical], positions[displaced] = logical, position
             occupants[logical], occupants[position] = logical, displaced
@@ -513,7 +541,7 @@ class _Compiler:
 
 def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, width=None,
                             max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS,
-                            max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS):
+                            max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS, basis_gates=None):
     """Return a new AST; never mutate the caller's parsed program.
 
     Width is an upper bound. This path does not allocate clean ancillas: a qubit
@@ -522,10 +550,11 @@ def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, wid
     if max_inline_statements < 1:
         raise ValueError('max_inline_statements must be positive')
     if not quantum_definitions(program):
-        compiler = _Compiler(optimization_level, epsilon, width, max_loop_variants=max_loop_variants)
+        compiler = _Compiler(optimization_level, epsilon, width, max_loop_variants=max_loop_variants, basis_gates=basis_gates)
         compiler.preflight(program)
         result = copy.deepcopy(program)
         result.statements = compiler.block(result.statements, _Scope(), global_scope=True)
+        compiler.add_definitions(result)
         result.version = result.version or '3.0'
         return result
     if any(isinstance(node, (ast.FloatLiteral, ast.ImaginaryLiteral, ast.DurationLiteral))
@@ -536,12 +565,13 @@ def compile_clifford_t_qasm3(program, *, optimization_level=3, epsilon=None, wid
         openqasm3.dumps(program), optimization_level=optimization_level, epsilon=epsilon,
         width=width, max_loop_variants=max_loop_variants,
         max_inline_statements=max_inline_statements,
+        basis_gates=basis_gates,
     )[1]
 
 
 def compile_clifford_t_source_with_ast(source, *, program=None, optimization_level=3, epsilon=None,
                                       width=None, max_loop_variants=DEFAULT_MAX_LOOP_VARIANTS,
-                                      max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS):
+                                      max_inline_statements=DEFAULT_MAX_INLINE_STATEMENTS, basis_gates=None):
     """Transform source text without reprinting its classical statements.
 
     The optional program must be the unmodified AST parsed from this source;
@@ -558,12 +588,13 @@ def compile_clifford_t_source_with_ast(source, *, program=None, optimization_lev
         raise SourceCompilationError(str(exc)) from exc
     if expanded:
         editor = _SourceEditor(source)
-    compiler = _Compiler(optimization_level, epsilon, width, editor, max_loop_variants)
+    compiler = _Compiler(optimization_level, epsilon, width, editor, max_loop_variants, basis_gates)
     try:
         if expanded:
             compiler.preflight(program)
         compiled = copy.deepcopy(program)
         compiled.statements = compiler.block(compiled.statements, _Scope(), global_scope=True)
+        compiler.add_definitions(compiled)
     except SourceCompilationError as exc:
         if expanded:
             raise SourceCompilationError('expanded subroutine source: ' + str(exc)) from exc
