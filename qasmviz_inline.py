@@ -2,7 +2,7 @@
 
 Classical arguments are copied, quantum arguments are references, and each
 expansion has its own return boundary. This is not a general type checker:
-recursive calls, array-reference parameters and calls embedded in expressions
+recursive calls, array-reference parameters and general embedded expressions
 are rejected rather than being reordered or assigned guessed semantics.
 """
 
@@ -77,12 +77,13 @@ class Scope:
     names: set = field(default_factory=set)
     functions: dict = field(default_factory=dict)
     captures: dict = field(default_factory=dict)
+    stable: set = field(default_factory=set)
     local: bool = False
 
     def child(self):
         return Scope(dict(self.renames), dict(self.quantum_expressions), dict(self.qubits),
                      dict(self.constants), set(self.names), dict(self.functions),
-                     dict(self.captures), self.local)
+                     dict(self.captures), set(self.stable), self.local)
 
     def mask(self, name, replacement):
         self.renames[name] = replacement
@@ -92,9 +93,35 @@ class Scope:
         self.quantum_expressions.pop(name, None)
         self.functions.pop(name, None)
         self.captures.pop(name, None)
+        self.stable.discard(name)
 
     def evaluator(self):
         return ConstantEvaluator(self.constants, self.names)
+
+    def stable_expression(self, expression):
+        """Whether a scalar expression can safely replace a by-value copy.
+
+        Merely lacking function calls is insufficient: an array element can
+        change while a later argument is being evaluated. Restrict reuse to
+        constants, immutable loop iterators and already checked substitutions.
+        """
+        if isinstance(expression, ast.Identifier):
+            if expression.name in self.constants or expression.name in self.stable or expression.name in self.quantum_expressions:
+                return True
+            try:
+                self.evaluator().evaluate(expression)  # Includes unshadowed pi/tau/euler.
+                return True
+            except ConstantEvaluationError:
+                return False
+        if isinstance(expression, (ast.BooleanLiteral, ast.IntegerLiteral, ast.FloatLiteral)):
+            return True
+        if isinstance(expression, ast.UnaryExpression):
+            return self.stable_expression(expression.expression)
+        if isinstance(expression, ast.BinaryExpression):
+            return self.stable_expression(expression.lhs) and self.stable_expression(expression.rhs)
+        if isinstance(expression, ast.Cast):
+            return self.stable_expression(expression.argument)
+        return False
 
 
 @dataclass
@@ -282,7 +309,39 @@ class Inliner:
         for node in nodes(value):
             if isinstance(node, ast.FunctionCall) and node.name.name in self.quantum:
                 raise error(node, 'quantum subroutine calls must be a whole statement, assignment, '
-                            'initializer or return; split this expression into separate statements')
+                            'initializer, return or control-flow test (possibly cast or negated); '
+                            'split this expression into separate statements')
+
+    def test_expression(self, expression, scope, stack):
+        """Lower a direct control-flow call without moving other evaluations.
+
+        Unary operators and casts evaluate only one operand. General binary
+        expressions and argument lists need further lowering to preserve their
+        left-to-right evaluation order and are deliberately left unsupported.
+        """
+        if isinstance(expression, ast.FunctionCall) and expression.name.name in self.quantum:
+            prefix, result = self.expand(expression, scope, stack)
+            if result is None:
+                raise error(expression, 'void quantum subroutine cannot be used as a control-flow test')
+            return prefix, result
+        if isinstance(expression, (ast.UnaryExpression, ast.Cast)):
+            field = 'expression' if isinstance(expression, ast.UnaryExpression) else 'argument'
+            prefix, operand = self.test_expression(getattr(expression, field), scope, stack)
+            result = copy.copy(expression)
+            setattr(result, field, operand)
+            if isinstance(expression, ast.Cast):
+                self.check_calls(expression.type)
+                result.type = self.rewrite(expression.type, scope)
+            return prefix, result
+        self.check_calls(expression)
+        return [], self.rewrite(expression, scope)
+
+    def replace_control(self, statement, replacement, starting_count, *, edit, scope_body):
+        # Nested expansions are part of replacement: charge them only once.
+        self.count = starting_count + sum(isinstance(n, ast.Statement) for n in nodes(replacement))
+        self.check_budget(statement)
+        if edit:
+            self.editor.replace([statement], [replacement], scope_body=scope_body, printer=self.print_statements)
 
     def expand(self, call, caller, stack):
         starting_count = self.count
@@ -312,10 +371,17 @@ class Inliner:
                 if isinstance(actual, ast.Identifier) and actual.name == callable_name:
                     raise error(call, f'caller shadows captured callable {callable_name!r}; use distinct names')
         prefix, references = [], []
-        for formal, actual in zip(definition.arguments, call.arguments):
+        for position, (formal, actual) in enumerate(zip(definition.arguments, call.arguments)):
             formal_name = formal.name.name
             if isinstance(formal, ast.QuantumArgument):
                 ref = self.reference(actual, caller)
+                if ref.members is None and any(isinstance(n, ast.FunctionCall) for n in nodes(call.arguments[position + 1:])):
+                    # Scalar operands are substituted into the body. We cannot
+                    # defer a runtime selection across a later argument that
+                    # may mutate its inputs. Capturing arbitrary runtime index
+                    # types requires type information this pass does not have.
+                    raise error(actual, 'dynamic qubit selection may change while evaluating a later argument; '
+                                'use a fixed qubit selection or split the computation explicitly')
                 if formal.size is None:
                     if not ref.scalar:
                         raise error(actual, f'quantum argument {formal_name!r} requires a scalar qubit')
@@ -360,9 +426,7 @@ class Inliner:
                     scope.constants[formal_name] = constant
                 else:
                     prefix.append(ast.ClassicalDeclaration(kind, replacement, value))
-                    # A by-value scalar copy is stable during this call. Only
-                    # pure expressions may be reused for quantum specialization.
-                    if immutable and not any(isinstance(n, (ast.FunctionCall, ast.QuantumMeasurement)) for n in nodes(actual)):
+                    if immutable and caller.stable_expression(actual):
                         scope.quantum_expressions[formal_name] = ast.Cast(kind, self.rewrite(actual, caller, quantum=True))
         result = self.fresh('result') if definition.return_type is not None else None
         if result is not None:
@@ -430,6 +494,7 @@ class Inliner:
     def block(self, statements, scope, *, stack=(), returns=None, edit=False, global_scope=False, scope_body=False):
         result = []
         for statement in statements:
+            starting_count = self.count
             if getattr(statement, 'annotations', None):
                 raise error(statement, 'annotations are not supported by source Clifford+T compilation')
             if isinstance(statement, ast.SubroutineDefinition):
@@ -468,24 +533,36 @@ class Inliner:
             # Containers are checked one expression/body at a time so a call
             # in an ordinary nested statement can be expanded at its own span.
             if isinstance(statement, ast.BranchingStatement):
-                self.check_calls(statement.condition)
                 new = copy.copy(statement)
-                new.condition = self.rewrite(statement.condition, scope)
-                new.if_block = self.block(statement.if_block, scope.child(), stack=stack, returns=returns, edit=edit, scope_body=True)
-                new.else_block = self.block(statement.else_block, scope.child(), stack=stack, returns=returns, edit=edit, scope_body=True)
+                prefix, new.condition = self.test_expression(statement.condition, scope, stack)
+                new.if_block = self.block(statement.if_block, scope.child(), stack=stack, returns=returns, edit=edit and not prefix, scope_body=True)
+                new.else_block = self.block(statement.else_block, scope.child(), stack=stack, returns=returns, edit=edit and not prefix, scope_body=True)
+                if prefix:
+                    new = ast.CompoundStatement(prefix + [new])
+                    self.replace_control(statement, new, starting_count, edit=edit, scope_body=scope_body and len(statements) == 1)
             elif isinstance(statement, (ast.ForInLoop, ast.WhileLoop)):
                 child = scope.child()
                 new = copy.copy(statement)
+                prefix = []
                 if isinstance(statement, ast.ForInLoop):
                     self.check_calls(statement.set_declaration)
                     new.type = self.rewrite(statement.type, scope)
                     new.set_declaration = self.rewrite(statement.set_declaration, scope, quantum=True)
                     new.identifier = self.fresh(statement.identifier.name) if scope.local else statement.identifier
                     child.mask(statement.identifier.name, new.identifier)
+                    if not writes_name(statement.block, statement.identifier.name):
+                        child.stable.add(statement.identifier.name)
                 else:
-                    self.check_calls(statement.while_condition)
-                    new.while_condition = self.rewrite(statement.while_condition, scope)
-                new.block = self.block(statement.block, child, stack=stack, returns=returns, edit=edit, scope_body=True)
+                    prefix, new.while_condition = self.test_expression(statement.while_condition, scope, stack)
+                new.block = self.block(statement.block, child, stack=stack, returns=returns, edit=edit and not prefix, scope_body=True)
+                if prefix:
+                    # The call is at the loop head, so continue evaluates it
+                    # again, while break and return do not make an extra call.
+                    stop = ast.BranchingStatement(ast.UnaryExpression(ast.UnaryOperator['!'], new.while_condition),
+                                                  [ast.BreakStatement()], [])
+                    new.block = prefix + [stop, ast.CompoundStatement(new.block)]
+                    new.while_condition = ast.BooleanLiteral(True)
+                    self.replace_control(statement, new, starting_count, edit=edit, scope_body=scope_body and len(statements) == 1)
                 result.append(new)
                 if returns is not None:
                     result.append(ast.BranchingStatement(returns[1], [ast.BreakStatement()], []))
@@ -494,16 +571,18 @@ class Inliner:
                 new = copy.copy(statement)
                 new.statements = self.block(statement.statements, scope.child(), stack=stack, returns=returns, edit=edit)
             elif isinstance(statement, ast.SwitchStatement):
-                self.check_calls(statement.target)
                 new = copy.copy(statement)
-                new.target = self.rewrite(statement.target, scope)
+                prefix, new.target = self.test_expression(statement.target, scope, stack)
                 new.cases = []
                 for labels, case in statement.cases:
                     self.check_calls(labels)
-                    body = self.block(case.statements, scope.child(), stack=stack, returns=returns, edit=edit)
+                    body = self.block(case.statements, scope.child(), stack=stack, returns=returns, edit=edit and not prefix)
                     new.cases.append((self.rewrite(labels, scope), ast.CompoundStatement(body)))
                 if statement.default is not None:
-                    new.default = ast.CompoundStatement(self.block(statement.default.statements, scope.child(), stack=stack, returns=returns, edit=edit))
+                    new.default = ast.CompoundStatement(self.block(statement.default.statements, scope.child(), stack=stack, returns=returns, edit=edit and not prefix))
+                if prefix:
+                    new = ast.CompoundStatement(prefix + [new])
+                    self.replace_control(statement, new, starting_count, edit=edit, scope_body=scope_body and len(statements) == 1)
             else:
                 self.check_calls(statement)
                 if isinstance(statement, (ast.ClassicalDeclaration, ast.ConstantDeclaration, ast.IODeclaration)):

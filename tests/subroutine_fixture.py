@@ -99,6 +99,8 @@ def execute(program, *, initial=None, outcomes=()):
             return node.value
         if isinstance(node, ast.Identifier):
             return frame.get(node.name)
+        if isinstance(node, ast.ArrayLiteral):
+            return [value(item, frame) for item in node.values]
         if isinstance(node, ast.IndexedIdentifier):
             result = frame.get(node.name.name)
             for index in node.indices:
@@ -106,6 +108,10 @@ def execute(program, *, initial=None, outcomes=()):
             return result
         if isinstance(node, ast.IndexExpression):
             collection = value(node.collection, frame)
+            if isinstance(collection, list):
+                index = node.index
+                assert isinstance(index, list) and len(index) == 1
+                return collection[value(index[0], frame)]
             return tuple(collection[i] for i in selection(node.index, len(collection), frame))
         if isinstance(node, ast.Concatenation):
             return value(node.lhs, frame) + value(node.rhs, frame)
@@ -140,6 +146,14 @@ def execute(program, *, initial=None, outcomes=()):
         raise AssertionError(f'unexpected fixture expression: {node}')
 
     def store(target, rhs, frame, op='='):
+        if isinstance(target, ast.IndexedIdentifier):
+            collection = frame.get(target.name.name)
+            assert isinstance(collection, list) and len(target.indices) == 1
+            index = value(target.indices[0][0], frame)
+            if op != '=':
+                rhs = {'+=': operator.add, '-=': operator.sub}[op](collection[index], rhs)
+            collection[index] = rhs
+            return
         assert isinstance(target, ast.Identifier), target
         owner = frame.owner(target.name)
         if op != '=':
