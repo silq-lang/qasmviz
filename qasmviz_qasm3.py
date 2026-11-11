@@ -21,6 +21,7 @@ from qiskit_qasm3_import.exceptions import ConversionError
 from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager
 from qasmviz_basis import clifford_decomposition, validate_clifford_basis
 from qasmviz_clifford_qasm import clifford_definitions
+from qasmviz_phases import normalize_controlled_phases
 from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator
 from qasmviz_loops import Iterations, iterations, writes_name
 from qasmviz_inline import (
@@ -349,7 +350,7 @@ class _Compiler:
                              "use literal parameters and static qubit indices for this initial compiler")
         source = openqasm3.dumps(ast.Program(scope.preamble + folded, version="3.0"))
         try:
-            original = import_quantum(source)
+            original = normalize_controlled_phases(import_quantum(source))
             if original.num_qubits != len(scope.qubit_operands):
                 raise _error(region[0], "quantum block refers to undeclared qubits")
             if original.parameters:

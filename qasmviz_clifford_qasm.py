@@ -46,7 +46,7 @@ def _add_phases(statements, circuit):
                                                        ast.WhileLoop, ast.SwitchStatement))]
     operations = [i.operation for i in circuit.data if isinstance(i.operation, ControlFlowOp)]
     if len(controls) != len(operations):
-        raise ValueError('cannot match exported control flow when preserving Clifford+T phases')
+        raise ValueError('cannot match exported control flow when preserving global phases')
     for statement, operation in zip(controls, operations):
         if isinstance(statement, ast.BranchingStatement):
             blocks = [statement.if_block, statement.else_block][:len(operation.blocks)]
@@ -57,7 +57,7 @@ def _add_phases(statements, circuit):
             if statement.default is not None:
                 blocks.append(statement.default.statements)
         if len(blocks) != len(operation.blocks):
-            raise ValueError('cannot match exported blocks when preserving Clifford+T phases')
+            raise ValueError('cannot match exported blocks when preserving global phases')
         for body, block in zip(blocks, operation.blocks):
             _add_phases(body, block)
     if float(circuit.global_phase):
@@ -67,11 +67,21 @@ def _add_phases(statements, circuit):
         statements.insert(position, ast.QuantumPhase([], ast.FloatLiteral(float(circuit.global_phase)), []))
 
 
-def dumps_clifford_t(circuit):
+def _phase_safe_program(circuit):
     program = openqasm3.parse(qasm3.dumps(circuit))
+    if not _exporter_preserves_phase():
+        _add_phases(program.statements, circuit)
+    return program
+
+
+def dumps_with_phases(circuit):
+    """Export circuit and control-flow block phases as explicit gphase calls."""
+    return openqasm3.dumps(_phase_safe_program(circuit))
+
+
+def dumps_clifford_t(circuit):
+    program = _phase_safe_program(circuit)
     for index, statement in enumerate(program.statements):
         if isinstance(statement, ast.QuantumGateDefinition) and statement.name.name in NONSTANDARD_CLIFFORDS:
             program.statements[index] = copy.deepcopy(_definition(statement.name.name))
-    if not _exporter_preserves_phase():
-        _add_phases(program.statements, circuit)
     return openqasm3.dumps(program)

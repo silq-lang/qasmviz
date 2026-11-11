@@ -18,6 +18,7 @@ from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 from qasmviz_clifford_t import clifford_t_pass_manager, validate_epsilon
 from qasmviz_basis import parse_extended_basis, restore_logical_wires
+from qasmviz_phases import normalize_controlled_phases
 
 
 CX_U_BASIS = ["cx", "u"]
@@ -2545,6 +2546,7 @@ def main() -> None:
             # Reuse the AST already parsed for Clifford+T path selection.
             qc = convert(program) if args.clifford_t else parse(qasm3_code)
 
+        qc = normalize_controlled_phases(qc)
         if not args.no_cancel_swaps:
             qc = cancel_swaps(qc)
 
@@ -2714,12 +2716,12 @@ def main() -> None:
                     1,
                 ))
             else:
-                from qiskit import qasm3
                 if args.clifford_t_ext is not None:
                     from qasmviz_clifford_qasm import dumps_clifford_t
                     print(dumps_clifford_t(selected))
                 else:
-                    print(qasm3.dumps(selected))
+                    from qasmviz_clifford_qasm import dumps_with_phases
+                    print(dumps_with_phases(selected))
             need_blank = True
 
         if do_dump2:
