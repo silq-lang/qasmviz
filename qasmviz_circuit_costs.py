@@ -106,4 +106,6 @@ def collect_circuit_dynamic_costs(circuit, t_cost):
         result[key] = counts.get(key, Bound()).json()
     result['gate-counts'] = {key[5:]: value.json() for key, value in sorted(counts.items())
                            if key.startswith('gate:') and value.upper != 0}
-    return result
+    from qasmviz_expected import attach_expected_counts
+    from qasmviz_expected_circuit import execute_circuit
+    return attach_expected_counts(result, lambda budget: execute_circuit(circuit, t_cost, budget))

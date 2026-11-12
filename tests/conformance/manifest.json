@@ -119,7 +119,41 @@
           "width": 1,
           "t-count": {"lower": 0, "upper": 0},
           "measurements": {"lower": 1, "upper": 2},
-          "resets": {"lower": 1, "upper": 2}
+          "resets": {"lower": 1, "upper": 2},
+          "expected-counts": {
+            "status": "exact",
+            "measurements": {"numerator": 3, "denominator": 2},
+            "resets": {"numerator": 3, "denominator": 2}
+          }
+        }
+      }
+    },
+    {
+      "name": "expected-uncomputation-cost",
+      "source": "expected-uncomputation.qasm",
+      "args": ["--clifford-t", "--opt", "0", "--json"],
+      "expect": {
+        "format": "json",
+        "subset": {
+          "expected-counts": {
+            "status": "exact",
+            "t-count": {"numerator": 7, "denominator": 1},
+            "cx-count": {"numerator": 13, "denominator": 2}
+          }
+        }
+      }
+    },
+    {
+      "name": "expected-correlated-measurements",
+      "source": "expected-correlations.qasm",
+      "args": ["--clifford-t", "--json"],
+      "expect": {
+        "format": "json",
+        "subset": {
+          "expected-counts": {
+            "status": "exact",
+            "t-count": {"numerator": 1, "denominator": 2}
+          }
         }
       }
     }

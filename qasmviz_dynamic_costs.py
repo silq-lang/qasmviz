@@ -2,7 +2,8 @@
 
 Each exit kind carries independent lower/upper bounds. Classical state and
 branch correlations are not inferred. Unknown iteration bounds have a null
-upper bound; depth and execution probabilities are deliberately not estimated.
+upper bound; depth is not estimated. A separate bounded pass adds exact
+expectations where it can prove measurement probabilities and classical flow.
 """
 
 from dataclasses import dataclass, field
@@ -309,7 +310,9 @@ def collect_dynamic_costs(program):
         result[key] = counts.get(key, Bound()).json()
     result['gate-counts'] = {key[5:]: value.json() for key, value in sorted(counts.items())
                            if key.startswith('gate:') and value.upper != 0}
-    return result
+    from qasmviz_expected import attach_expected_counts
+    from qasmviz_expected_qasm import execute_qasm
+    return attach_expected_counts(result, lambda budget: execute_qasm(program, budget))
 
 
 def print_dynamic_costs(costs):
@@ -321,4 +324,19 @@ def print_dynamic_costs(costs):
         low, high = costs[key]['lower'], costs[key]['upper']
         value = f'{low}..unknown' if high is None else (str(low) if low == high else f'{low}..{high}')
         print(f'  {key}: {value}')
-    print('Depth is not estimated; branch correlations and execution probabilities are not inferred.')
+    expected = costs.get('expected-counts')
+    if expected is not None:
+        print('Expected execution counts (exact where known; qubits initially zero):')
+        for key in ('gate-count', 't-count', 'cx-count', '2q-count', 'measurements', 'resets'):
+            if key not in expected:
+                continue
+            value = expected[key]
+            if value is None:
+                text = 'unknown'
+            else:
+                numerator, denominator = value['numerator'], value['denominator']
+                text = str(numerator) if denominator == 1 else f'{numerator}/{denominator}'
+            print(f'  {key}: {text}')
+        if 'reason' in expected:
+            print('Expected-count analysis stopped: ' + expected['reason'] + '.')
+    print('Depth is not estimated.')
