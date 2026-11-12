@@ -158,44 +158,9 @@ def clifford_decomposition(name, basis):
 
 
 def restore_logical_wires(circuit, basis):
-    """Materialize the layout before exporting or simulating a circuit.
-
-    QASM and qblaze do not interpret Qiskit's final-layout metadata. Restore
-    permutations using allowed gates, so displayed costs include that work.
-    """
-    if circuit.layout is None:
-        return circuit
-    n = circuit.num_qubits
-    initial = circuit.layout.initial_index_layout(filter_ancillas=False)
-    final = circuit.layout.final_index_layout(filter_ancillas=False)
-    if len(initial) != n or len(final) != n or set(initial) != set(range(n)) or set(final) != set(range(n)):
-        raise TranspilerError('unsupported Clifford+T layout')
-    physical_to_source = [0] * n
-    for logical, physical in enumerate(initial):
-        physical_to_source[physical] = logical
-    result = circuit.copy_empty_like()
-    # copy_empty_like retains this metadata; it would apply the permutation
-    # again if left attached to the explicitly rewired circuit.
-    result._layout = None
-    for instruction in circuit.data:
-        result.append(instruction.operation,
-                      [result.qubits[physical_to_source[circuit.find_bit(q).index]] for q in instruction.qubits],
-                      [result.clbits[circuit.find_bit(c).index] for c in instruction.clbits])
-    positions = [physical_to_source[physical] for physical in final]
-    occupants = [0] * n
-    for logical, position in enumerate(positions):
-        occupants[position] = logical
-    swap = None
-    for logical in range(n):
-        position = positions[logical]
-        if position == logical:
-            continue
-        swap = clifford_decomposition('swap', basis) if swap is None else swap
-        result.compose(swap, qubits=[logical, position], inplace=True)
-        displaced = occupants[logical]
-        positions[logical], positions[displaced] = logical, position
-        occupants[logical], occupants[position] = logical, displaced
-    return result
+    """Materialize a Clifford+T layout using only the selected basis gates."""
+    from qasmviz_layout import restore_layout
+    return restore_layout(circuit, basis_gates=basis)
 
 
 class CliffordBasisTranslation(TransformationPass):

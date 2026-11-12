@@ -16,8 +16,9 @@ import argparse
 from qiskit_qasm3_import import convert, parse
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-from qasmviz_clifford_t import clifford_t_pass_manager, validate_epsilon
-from qasmviz_basis import parse_extended_basis, restore_logical_wires
+from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager, validate_epsilon
+from qasmviz_basis import parse_extended_basis
+from qasmviz_layout import restore_layout
 from qasmviz_phases import normalize_controlled_phases
 
 
@@ -2569,11 +2570,14 @@ def main() -> None:
         _cirq_qasm2 = None
         _pytket_qasm2 = None
         _compiled_cirq = None
+        basis = None
+        physical_target = None
 
         if args.fez:
             from qiskit_ibm_runtime.fake_provider import FakeFez
 
             backend = FakeFez()
+            physical_target = backend.target
             pm = generate_preset_pass_manager(
                 optimization_level=args.opt_level,
                 backend=backend,
@@ -2583,6 +2587,7 @@ def main() -> None:
         elif args.tk2:
             _tk_circuit, selected, _pytket_qasm2 = _compile_pytket_tk2(qc)
         elif args.clifford_t:
+            basis = args.clifford_t_ext or CLIFFORD_T_BASIS
             pm = clifford_t_pass_manager(
                 optimization_level=args.opt_level,
                 epsilon=args.eps,
@@ -2590,8 +2595,6 @@ def main() -> None:
                 basis_gates=args.clifford_t_ext,
             )
             selected = pm.run(qc)
-            if args.clifford_t_ext is not None:
-                selected = restore_logical_wires(selected, args.clifford_t_ext)
         elif args.cx_u or args.cx_sx or args.ecr_sx or args.cz_sx or args.iswap_rx or args.rzz_rx or args.rxx_rx or args.cx_rx or args.cz_rx:
             basis = (
                 CX_U_BASIS if args.cx_u else
@@ -2676,6 +2679,9 @@ def main() -> None:
             _compiled_cirq, selected, _cirq_qasm2 = _compile_ionq(qc, gateset_name=gateset_name)
         else:
             selected = qc
+
+        selected = restore_layout(selected, basis_gates=basis, target=physical_target,
+                                  initially_zero=True)
 
         # With multiple files, default to --cost rather than --show.
         explicitly_selected_output = args.show or args.dump or args.dump2 or args.run or args.cost or args.json
