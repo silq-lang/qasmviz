@@ -184,6 +184,19 @@ if (counter == 2) { x q[0]; }
             with self.subTest(modification=modification), self.assertRaisesRegex(SourceCompilationError, 'iterator is modified'):
                 compile_clifford_t_source(HEADER + 'qubit[3] q; for int i in [0:1] { ' + modification + ' h q[i]; }')
 
+    def test_indexed_assignment_reads_iterator_without_modifying_it(self):
+        from qasmviz_dynamic_costs import collect_dynamic_costs
+        for assignment in ('m[i] = true;', 'm[i] = measure q[i];'):
+            with self.subTest(assignment=assignment):
+                source = HEADER + 'qubit[2] q; bit[2] m; for int i in [0:1] { t q[i]; ' + assignment + ' }'
+                output = compile_clifford_t_source(source)
+                self.assertIn(assignment, output)
+                self.assertNotIn('t q[i]', output)
+                counts = collect_dynamic_costs(openqasm3.parse(output))
+                self.assertEqual(counts['t-count'], {'lower': 2, 'upper': 2})
+                measurements = 2 if 'measure' in assignment else 0
+                self.assertEqual(counts['measurements'], {'lower': measurements, 'upper': measurements})
+
     def test_runtime_iteration_bounds_are_rejected_when_needed(self):
         with self.assertRaisesRegex(SourceCompilationError, 'cannot specialize loop variable'):
             compile_clifford_t_source(HEADER + 'int n=2; qubit[3] q; for int i in [0:n] { h q[i]; }')

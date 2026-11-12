@@ -71,6 +71,11 @@ def writes_name(statements, name):
             target = node.target
         else:
             continue
-        if any(isinstance(child, ast.Identifier) and child.name == name for child in nodes(target)):
+        # An index is read to choose the destination; only the indexed object
+        # is written. Treating m[i] as a write to i prevents valid loops from
+        # being specialized and can also invalidate immutable arguments.
+        if isinstance(target, ast.IndexedIdentifier):
+            target = target.name
+        if isinstance(target, ast.Identifier) and target.name == name:
             return True
     return False
