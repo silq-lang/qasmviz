@@ -492,6 +492,19 @@ def t_cost_fully_known(circuit) -> bool:
         for instr in circuit.data
     )
 
+
+def _dynamic_t_cost(operation):
+    if operation.name in _ROTATION_GATES:
+        return _gate_t_cost(operation)
+    if operation.name in _CLIFFORD_GATES:
+        return 0
+    from qiskit.circuit import ControlledGate
+    from qiskit.circuit.library import XGate, YGate, ZGate
+    if (isinstance(operation, ControlledGate) and operation.num_ctrl_qubits == 1
+            and isinstance(operation.base_gate, (XGate, YGate, ZGate))):
+        return 0  # Negative controls on Paulis are still Clifford.
+    return None
+
 def _iter_condition_clbits(cond):
     """
     Yield Clbit objects referenced by a Qiskit control-flow condition/target.
@@ -800,6 +813,11 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
     Keys present depend on the circuit; absent metrics are not included.
     Structured sub-fields (e.g. rotation breakdown) are nested dicts.
     """
+    from qiskit.circuit import ControlFlowOp
+    if any(isinstance(i.operation, ControlFlowOp) for i in circuit.data):
+        from qasmviz_circuit_costs import collect_circuit_dynamic_costs
+        return collect_circuit_dynamic_costs(circuit, _dynamic_t_cost)
+
     # rz is a virtual gate (frame change) on both superconducting and trapped-ion
     # hardware — it maps to a classical phase update with no pulse cost.
     virtual_rz = cx_sx or ecr_sx or cz_sx or iswap_rx or rzz_rx or rxx_rx or cx_rx or cz_rx or xxphase_rx or quantinuum_h or aqt or iqm or ionq_aria or ionq_forte or syc_phxz or sqrtiswap_phxz or quera_gemini or fez or ibm_eagle or ibm_heron or ibm_heron_frac or rigetti
@@ -1188,6 +1206,11 @@ def collect_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx:
 
 def print_costs(circuit, *, clifford_t: bool, cx_u: bool, cx_sx: bool, ecr_sx: bool, cz_sx: bool, iswap_rx: bool, rzz_rx: bool, rxx_rx: bool, cx_rx: bool, cz_rx: bool, xxphase_rx: bool, quantinuum_h: bool, aqt: bool, tk2: bool, ionq_aria: bool, ionq_forte: bool, syc_phxz: bool, sqrtiswap_phxz: bool, quera_gemini: bool, fez: bool, ibm_eagle: bool, ibm_heron: bool, ibm_heron_frac: bool, rigetti: bool, iqm: bool) -> None:
     data = collect_costs(circuit, clifford_t=clifford_t, cx_u=cx_u, cx_sx=cx_sx, ecr_sx=ecr_sx, cz_sx=cz_sx, iswap_rx=iswap_rx, rzz_rx=rzz_rx, rxx_rx=rxx_rx, cx_rx=cx_rx, cz_rx=cz_rx, xxphase_rx=xxphase_rx, quantinuum_h=quantinuum_h, aqt=aqt, tk2=tk2, ionq_aria=ionq_aria, ionq_forte=ionq_forte, syc_phxz=syc_phxz, sqrtiswap_phxz=sqrtiswap_phxz, quera_gemini=quera_gemini, fez=fez, ibm_eagle=ibm_eagle, ibm_heron=ibm_heron, ibm_heron_frac=ibm_heron_frac, rigetti=rigetti, iqm=iqm)
+
+    if data.get('analysis') == 'dynamic':
+        from qasmviz_dynamic_costs import print_dynamic_costs
+        print_dynamic_costs(data)
+        return
 
     rows: list[tuple[str, object] | None] = [
         ("width", data["width"]),
@@ -2690,7 +2713,7 @@ def main() -> None:
         do_dump2 = args.dump2
         do_run = args.run
         default_cost = do_show or (multiple and not explicitly_selected_output)
-        do_cost = (args.cost or (default_cost and (args.show or not args.run))) and not args.no_cost
+        do_cost = (args.cost or (default_cost and (args.show or not args.run))) and not args.no_cost and not args.json
         do_json = args.json
 
         need_blank = False

@@ -197,12 +197,12 @@ class ControlledPhaseCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('circuit-', result.stdout)
         self.assertIn('P(π/4)', result.stdout)
-        self.assertIn('T=2', result.stdout)
+        self.assertIn('t-count: 2', result.stdout)
         result = self.cli('--json')
         self.assertEqual(result.returncode, 0, result.stderr)
         costs = json.loads(result.stdout)
-        self.assertEqual(costs['rotations']['t-count'], 2)
-        self.assertEqual(costs['gates']['gates']['p'], 9)
+        self.assertEqual(costs['t-count'], {'lower': 2, 'upper': 2})
+        self.assertEqual(costs['gate-counts']['p'], {'lower': 9, 'upper': 12})
 
     def test_dump_preserves_branch_phases(self):
         result = self.cli('--dump', '--no-cancel-swaps')

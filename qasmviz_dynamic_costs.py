@@ -315,7 +315,9 @@ def collect_dynamic_costs(program):
 def print_dynamic_costs(costs):
     print(f"width: {costs['width']}")
     print('Execution-count bounds (conservative):')
-    for key in ('gate-count', 't-count', 'cx-count', 'measurements', 'resets'):
+    for key in ('gate-count', 't-count', 'cx-count', '2q-count', 'measurements', 'resets'):
+        if key not in costs:
+            continue
         low, high = costs[key]['lower'], costs[key]['upper']
         value = f'{low}..unknown' if high is None else (str(low) if low == high else f'{low}..{high}')
         print(f'  {key}: {value}')
