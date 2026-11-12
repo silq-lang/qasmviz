@@ -20,6 +20,7 @@ from qasmviz_clifford_t import CLIFFORD_T_BASIS, clifford_t_pass_manager, valida
 from qasmviz_basis import parse_extended_basis
 from qasmviz_layout import restore_layout
 from qasmviz_phases import normalize_controlled_phases
+from qasmviz_qasm2 import dumps_qasm2, flat_registers
 
 
 CX_U_BASIS = ["cx", "u"]
@@ -1328,7 +1329,14 @@ def format_rotation_breakdown(breakdown: dict) -> str:
         sections.append(", ".join(clifford))
     return "; " + "; ".join(sections) if sections else ""
 
-def _cirq_op_to_qasm_line(op, qubit_to_name: dict, precision: int = 10) -> str:
+def _cirq_measurement_bit(key, size, width):
+    match = re.fullmatch(r'c_(\d+)', str(key))
+    if size != 1 or match is None or int(match[1]) >= width:
+        raise ValueError('Cirq changed a classical output bit during compilation')
+    return int(match[1])
+
+
+def _cirq_op_to_qasm_line(op, qubit_to_name: dict, precision: int = 17) -> str:
     """
     Emit a single QASM 2 instruction for a Cirq operation.
     ``qubit_to_name`` maps each Cirq qubit to its QASM string name,
@@ -1435,12 +1443,8 @@ def _compile_cirq(qc, *, gateset_name: str):
 
     from cirq.contrib.qasm_import import circuit_from_qasm as cirq_circuit_from_qasm
 
-    # Qiskit → QASM 2 → Cirq.
-    # Cirq's contrib QASM parser only knows qelib1.inc gates. Replace any
-    # 'p(...)' (PhaseGate, qelib1-absent but equivalent to rz up to global
-    # phase) with 'rz(...)' so the parser accepts it.
-    qasm2_str = qiskit_qasm2.dumps(qc)
-    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)
+    # Qiskit → strict, phase-preserving QASM 2 → Cirq.
+    qasm2_str = dumps_qasm2(flat_registers(qc))
     cirq_circuit = cirq_circuit_from_qasm(qasm2_str)
 
     # Compile to target gateset. Suppress a Cirq-internal FutureWarning
@@ -1465,8 +1469,9 @@ def _compile_cirq(qc, *, gateset_name: str):
         compiled_cirq = cirq.optimize_for_target_gateset(cirq_circuit, gateset=gateset)
 
     # --- Step 3: build QASM manually, keeping native gate names ---
-    # Sort qubits for stable ordering
-    all_qubits = sorted(compiled_cirq.all_qubits())
+    # Preserve numeric source order and idle wires; lexical sorting puts q_10
+    # before q_2, and all_qubits() omits wires without remaining operations.
+    all_qubits = [cirq.NamedQubit(f'q_{i}') for i in range(qc.num_qubits)]
     n = len(all_qubits)
     qubit_to_name = {q: f"q[{i}]" for i, q in enumerate(all_qubits)}
 
@@ -1513,15 +1518,6 @@ def _compile_cirq(qc, *, gateset_name: str):
         body = _gate_def_body(cirq.SQRT_ISWAP, 2)
         gate_defs.append(_make_gate_definition("sqrt_iswap", body, 2))
 
-    # Collect measurement keys
-    meas_keys = {}
-    for moment in compiled_cirq:
-        for op in moment.operations:
-            if isinstance(op.gate, cirq.MeasurementGate):
-                key = op.gate.key
-                if key not in meas_keys:
-                    meas_keys[key] = len(op.qubits)
-
     # Emit QASM
     lines = [
         'OPENQASM 2.0;',
@@ -1532,8 +1528,8 @@ def _compile_cirq(qc, *, gateset_name: str):
         lines.extend(gate_defs)
     lines.append("")
     lines.append(f"qreg q[{n}];")
-    for key, nbits in meas_keys.items():
-        lines.append(f"creg m_{key}[{nbits}];")
+    if qc.num_clbits:
+        lines.append(f"creg c[{qc.num_clbits}];")
     lines.append("")
 
     for moment in compiled_cirq:
@@ -1542,8 +1538,8 @@ def _compile_cirq(qc, *, gateset_name: str):
             qs = [qubit_to_name[q] for q in op.qubits]
 
             if isinstance(gate, cirq.MeasurementGate):
-                for i, q in enumerate(op.qubits):
-                    lines.append(f"measure {qubit_to_name[q]} -> m_{gate.key}[{i}];")
+                bit = _cirq_measurement_bit(gate.key, len(op.qubits), qc.num_clbits)
+                lines.append(f"measure {qs[0]} -> c[{bit}];")
             elif gateset_name == "syc" and isinstance(gate, cirq_google.SycamoreGate):
                 lines.append(f"syc {qs[0]}, {qs[1]};")
             elif gateset_name == "sqrtiswap" and isinstance(gate, cirq.ISwapPowGate) and abs(float(gate.exponent) - 0.5) < 1e-6:
@@ -1587,7 +1583,7 @@ def _compile_cirq(qc, *, gateset_name: str):
     phxz_instruction = CustomInstruction("phxz", 3, 1, PhXZGate)
     qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=[phxz_instruction])
 
-    return compiled_cirq, qiskit_circuit, qasm2_out
+    return compiled_cirq, qiskit_circuit, dumps_qasm2(qiskit_circuit)
 
 
 # ---------------------------------------------------------------------------
@@ -1660,7 +1656,7 @@ _PYTKET_GATE_DEFS = {
 }
 
 
-def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 10, phasedx_gate_name: str = "phasedx", xxphase_gate_name: str = "xxphase") -> str | None:
+def _pytket_op_to_qasm_line(cmd, qubit_to_name: dict, precision: int = 17, phasedx_gate_name: str = "phasedx", xxphase_gate_name: str = "xxphase") -> str | None:
     """
     Emit a single QASM 2 instruction for a pytket Command.
     Returns None for barrier/phase/noop operations that should be skipped.
@@ -1781,7 +1777,7 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str, phasedx_gate_name: st
     Raises SystemExit if pytket is not installed.
     """
     try:
-        from pytket.qasm import circuit_from_qasm_str, circuit_to_qasm_str
+        from pytket.qasm import circuit_from_qasm_str
         from pytket import OpType
     except ImportError:
         raise SystemExit(
@@ -1791,12 +1787,16 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str, phasedx_gate_name: st
     from qiskit import qasm2 as qiskit_qasm2
 
     # --- Step 1: Qiskit → QASM2 → pytket ---
-    qasm2_str = qiskit_qasm2.dumps(qc)
-    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)  # p( not in qelib1
+    qasm2_str = dumps_qasm2(flat_registers(qc))
     tk_circuit = circuit_from_qasm_str(qasm2_str)
+    from pytket.passes import DecomposeBoxes
+    DecomposeBoxes().apply(tk_circuit)
 
     # --- Step 2: rebase ---
     rebase_pass.apply(tk_circuit)
+    if tk_circuit.has_implicit_wireswaps:
+        tk_circuit.replace_implicit_wire_swaps()
+        rebase_pass.apply(tk_circuit)
 
     # --- Step 3: emit QASM2 with gate definitions ---
     # Determine which non-qelib1 gates appear
@@ -1820,7 +1820,7 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str, phasedx_gate_name: st
     qubit_to_name = {q: f"q[{i}]" for i, q in enumerate(all_qubits)}
 
     # Collect classical registers for measurements
-    creg_sizes: dict[str, int] = {}
+    creg_sizes: dict[str, int] = {'c': qc.num_clbits} if qc.num_clbits else {}
     for cmd in tk_circuit.get_commands():
         from pytket import OpType as _OT
         if cmd.op.type == _OT.Measure:
@@ -1870,8 +1870,9 @@ def _compile_pytket(qc, *, rebase_pass, gateset_name: str, phasedx_gate_name: st
         pass  # rxx is defined via gate def in the QASM output
 
     qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=_custom if _custom else None)
+    qiskit_circuit.global_phase += float(tk_circuit.phase) * math.pi
 
-    return tk_circuit, qiskit_circuit, qasm2_out
+    return tk_circuit, qiskit_circuit, dumps_qasm2(qiskit_circuit)
 
 
 # QASM 2 gate definitions for IonQ native gates.
@@ -1955,8 +1956,7 @@ def _compile_ionq(qc, *, gateset_name: str):
     from cirq.contrib.qasm_import import circuit_from_qasm as cirq_circuit_from_qasm
 
     # Qiskit → QASM 2 → Cirq.
-    qasm2_str = qiskit_qasm2.dumps(qc)
-    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)
+    qasm2_str = dumps_qasm2(flat_registers(qc))
     cirq_circuit = cirq_circuit_from_qasm(qasm2_str)
 
     # Compile to IonQ native gateset.
@@ -1975,20 +1975,11 @@ def _compile_ionq(qc, *, gateset_name: str):
         compiled_cirq = cirq.optimize_for_target_gateset(cirq_circuit, gateset=gateset)
 
     # Build hand-crafted QASM 2, keeping native gate names.
-    all_qubits = sorted(compiled_cirq.all_qubits())
+    all_qubits = [cirq.NamedQubit(f'q_{i}') for i in range(qc.num_qubits)]
     n = len(all_qubits)
     qubit_to_name = {q: f"q[{i}]" for i, q in enumerate(all_qubits)}
 
-    # Collect measurement keys.
-    meas_keys: dict[str, int] = {}
-    for moment in compiled_cirq:
-        for op in moment.operations:
-            if isinstance(op.gate, cirq.MeasurementGate):
-                key = op.gate.key
-                if key not in meas_keys:
-                    meas_keys[key] = len(op.qubits)
-
-    def _fmt(v: float, precision: int = 10) -> str:
+    def _fmt(v: float, precision: int = 17) -> str:
         return f"{v:.{precision}g}"
 
     lines = [
@@ -2004,8 +1995,8 @@ def _compile_ionq(qc, *, gateset_name: str):
         lines.append(_ZZ_GATE_DEF)
     lines.append('')
     lines.append(f"qreg q[{n}];")
-    for key, nbits in meas_keys.items():
-        lines.append(f"creg m_{key}[{nbits}];")
+    if qc.num_clbits:
+        lines.append(f"creg c[{qc.num_clbits}];")
     lines.append('')
 
     for moment in compiled_cirq:
@@ -2014,8 +2005,8 @@ def _compile_ionq(qc, *, gateset_name: str):
             qs = [qubit_to_name[q] for q in op.qubits]
 
             if isinstance(gate, cirq.MeasurementGate):
-                for i, q in enumerate(op.qubits):
-                    lines.append(f"measure {qubit_to_name[q]} -> m_{gate.key}[{i}];")
+                bit = _cirq_measurement_bit(gate.key, len(op.qubits), qc.num_clbits)
+                lines.append(f"measure {qs[0]} -> c[{bit}];")
             elif isinstance(gate, GPIGate):
                 lines.append(f"gpi({_fmt(float(gate.phi))}) {qs[0]};")
             elif isinstance(gate, GPI2Gate):
@@ -2099,7 +2090,7 @@ def _compile_ionq(qc, *, gateset_name: str):
 
     qiskit_circuit = qiskit_qasm2.loads(qasm2_out, custom_instructions=custom_instructions)
 
-    return compiled_cirq, qiskit_circuit, qasm2_out
+    return compiled_cirq, qiskit_circuit, dumps_qasm2(qiskit_circuit)
 
 
 def _compile_pytket_tk2(qc):
@@ -2111,24 +2102,24 @@ def _compile_pytket_tk2(qc):
     hardware-agnostic 2Q gate (the KAK / Weyl-chamber decomposition).
     TK1(a,b,c) = Rz(a) Rx(b) Rz(c) is the companion 1Q gate.
 
-    pytket's own circuit_to_qasm_str is used for QASM emission; it emits a
-    ``tk2`` gate definition automatically, so no custom emission is needed.
+    TK1 and TK2 are converted with their exact phases before QASM emission.
 
     Raises SystemExit if pytket is not installed.
     """
     try:
         from pytket import OpType
         from pytket.passes import KAKDecomposition, AutoRebase, SequencePass
-        from pytket.qasm import circuit_from_qasm_str, circuit_to_qasm_str
+        from pytket.qasm import circuit_from_qasm_str
     except ImportError:
         raise SystemExit("--tk2 requires pytket: pip install pytket")
 
     from qiskit import qasm2 as qiskit_qasm2
 
     # Qiskit → QASM 2 → pytket
-    qasm2_str = qiskit_qasm2.dumps(qc)
-    qasm2_str = re.sub(r'\bp\(', 'rz(', qasm2_str)
+    qasm2_str = dumps_qasm2(flat_registers(qc))
     tk_circuit = circuit_from_qasm_str(qasm2_str)
+    from pytket.passes import DecomposeBoxes
+    DecomposeBoxes().apply(tk_circuit)
 
     # Compile: KAK decomposition to TK2, then rebase 1Q gates to TK1
     import warnings as _warnings
@@ -2138,14 +2129,50 @@ def _compile_pytket_tk2(qc):
             KAKDecomposition(target_2qb_gate=OpType.TK2),
             AutoRebase({OpType.TK2, OpType.TK1}),
         ]).apply(tk_circuit)
+        if tk_circuit.has_implicit_wireswaps:
+            tk_circuit.replace_implicit_wire_swaps()
+            AutoRebase({OpType.TK2, OpType.TK1}).apply(tk_circuit)
 
-    # Emit via pytket's own QASM emitter (generates tk2 gate def automatically)
-    qasm2_out = circuit_to_qasm_str(tk_circuit)
+    # pytket's QASM emitter drops phases when lowering TK1 and defining TK2.
+    # Construct their exact operations before exporting to either QASM version.
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import Gate
+    from qiskit.circuit.library import U3Gate
 
-    # Re-parse in Qiskit (no custom instructions needed; tk2 def is in the QASM)
-    qiskit_circuit = qiskit_qasm2.loads(qasm2_out)
+    class TK2Gate(Gate):
+        def __init__(self, a, b, c):
+            super().__init__('tk2', 2, [a, b, c])  # radians, as in pytket's QASM
 
-    return tk_circuit, qiskit_circuit, qasm2_out
+        def _define(self):
+            circuit = QuantumCircuit(2)
+            circuit.rxx(self.params[0], 0, 1)
+            circuit.ryy(self.params[1], 0, 1)
+            circuit.rzz(self.params[2], 0, 1)
+            self.definition = circuit
+
+    qiskit_circuit = QuantumCircuit(tk_circuit.n_qubits, tk_circuit.n_bits,
+                                    global_phase=float(tk_circuit.phase) * math.pi)
+    qubits = {q: i for i, q in enumerate(tk_circuit.qubits)}
+    bits = {b: i for i, b in enumerate(tk_circuit.bits)}
+    for command in tk_circuit.get_commands():
+        wires = [qubits[q] for q in command.qubits]
+        kind = command.op.type
+        if kind == OpType.TK1:
+            a, b, c = [float(p) * math.pi for p in command.op.params]
+            qiskit_circuit.append(U3Gate(b, a - math.pi / 2, c + math.pi / 2), wires)
+            qiskit_circuit.global_phase -= (a + c) / 2
+        elif kind == OpType.TK2:
+            qiskit_circuit.append(TK2Gate(*[float(p) * math.pi for p in command.op.params]), wires)
+        elif kind == OpType.Measure:
+            qiskit_circuit.measure(wires[0], bits[command.bits[0]])
+        elif kind == OpType.Reset:
+            qiskit_circuit.reset(wires[0])
+        elif kind == OpType.Barrier:
+            qiskit_circuit.barrier(*wires)
+        else:
+            raise ValueError(f'unexpected operation after TK2 rebasing: {kind}')
+
+    return tk_circuit, qiskit_circuit, dumps_qasm2(qiskit_circuit)
 
 
 def main() -> None:
@@ -2737,29 +2764,18 @@ def main() -> None:
         if do_dump:
             if need_blank:
                 print()
-            native_qasm2 = _cirq_qasm2 or _pytket_qasm2
-            if native_qasm2 is not None:
-                print(native_qasm2.replace(
-                    'OPENQASM 2.0;\ninclude "qelib1.inc";',
-                    'OPENQASM 3.0;\ninclude "stdgates.inc";',
-                    1,
-                ))
+            if args.clifford_t_ext is not None:
+                from qasmviz_clifford_qasm import dumps_clifford_t
+                print(dumps_clifford_t(selected))
             else:
-                if args.clifford_t_ext is not None:
-                    from qasmviz_clifford_qasm import dumps_clifford_t
-                    print(dumps_clifford_t(selected))
-                else:
-                    from qasmviz_clifford_qasm import dumps_with_phases
-                    print(dumps_with_phases(selected))
+                from qasmviz_clifford_qasm import dumps_with_phases
+                print(dumps_with_phases(selected))
             need_blank = True
 
         if do_dump2:
-            from qiskit import qasm2
             if need_blank:
                 print()
-            native_qasm2 = _cirq_qasm2 or _pytket_qasm2
-            qasm2_out = native_qasm2 if native_qasm2 is not None else qasm2.dumps(selected)
-            print(re.sub(r'\bp\(', 'rz(', qasm2_out))
+            print(dumps_qasm2(selected))
             need_blank = True
 
         if do_cost:
