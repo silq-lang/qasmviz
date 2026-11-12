@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "amplitude_index_order": "qubit_0_is_least_significant",
+  "phase_comparison": "exact",
+  "cases": [
+    {
+      "name": "logical-output-wires",
+      "source": "layout.qasm",
+      "args": ["--clifford-t", "--no-cancel-swaps", "--dump"],
+      "expect": {
+        "format": "qasm3",
+        "qubits": 3,
+        "statevector": [
+          {"index": 0, "re": 0.7071067811865475, "im": 0},
+          {"index": 2, "re": 0.7071067811865475, "im": 0}
+        ],
+        "tolerance": 1e-12
+      }
+    },
+    {
+      "name": "negative-controlled-phase",
+      "source": "negative-phase.qasm",
+      "args": ["--dump"],
+      "expect": {
+        "format": "qasm3",
+        "qubits": 1,
+        "unitary": [[[0.7071067811865475, -0.7071067811865475], [0, 0]], [[0, 0], [1, 0]]],
+        "tolerance": 1e-12
+      }
+    },
+    {
+      "name": "conditional-execution-bounds",
+      "source": "conditional-cost.qasm",
+      "args": ["--json"],
+      "expect": {
+        "format": "json",
+        "subset": {
+          "analysis": "dynamic",
+          "bounds": "conservative",
+          "width": 2,
+          "depth": null,
+          "t-depth": null,
+          "t-count": {"lower": 0, "upper": 1},
+          "2q-count": {"lower": 1, "upper": 1},
+          "measurements": {"lower": 1, "upper": 1}
+        }
+      }
+    },
+    {
+      "name": "strict-qasm2-phases",
+      "source": "qasm2-phases.qasm",
+      "args": ["--dump2"],
+      "expect": {
+        "format": "qasm2",
+        "qubits": 2,
+        "unitary": [
+          [[1, 0], [0, 0], [0, 0], [0, 0]],
+          [[0, 0], [0.7071067811865475, 0.7071067811865475], [0, 0], [0, 0]],
+          [[0, 0], [0, 0], [1, 0], [0, 0]],
+          [[0, 0], [0, 0], [0, 0], [-0.7071067811865475, 0.7071067811865475]]
+        ],
+        "tolerance": 1e-12
+      }
+    },
+    {
+      "name": "custom-clifford-basis",
+      "source": "bell.qasm",
+      "args": ["--clifford-t-ext=[s,sx,cz]", "--dump"],
+      "expect": {
+        "format": "qasm3",
+        "qubits": 2,
+        "allowed_gates": ["s", "sx", "cz", "t", "tdg"],
+        "statevector": [
+          {"index": 0, "re": 0.7071067811865475, "im": 0},
+          {"index": 3, "re": 0.7071067811865475, "im": 0}
+        ],
+        "tolerance": 1e-12
+      }
+    },
+    {
+      "name": "incomplete-clifford-basis",
+      "source": "bell.qasm",
+      "args": ["--clifford-t-ext=[h,cx]", "--dump"],
+      "expect": {"exit_code": 2, "stderr_contains": "incomplete"}
+    },
+    {
+      "name": "inlined-measurements-in-loop",
+      "source": "inline-loop.qasm",
+      "args": ["--clifford-t", "--json"],
+      "expect": {
+        "format": "json",
+        "subset": {"width": 2, "measurements": {"lower": 2, "upper": 2}, "t-count": {"lower": 0, "upper": 0}}
+      }
+    },
+    {
+      "name": "per-rotation-approximation-budget",
+      "source": "approximation.qasm",
+      "args": ["--clifford-t", "--eps", "1e-5", "--dump"],
+      "expect": {
+        "format": "qasm3",
+        "qubits": 1,
+        "statevector": [
+          {"index": 0, "re": 0.7057600309442494, "im": -0.04362085191249601},
+          {"index": 1, "re": 0.7057600309442494, "im": 0.04362085191249601}
+        ],
+        "allowed_gates": ["cx", "h", "s", "sdg", "t", "tdg"],
+        "tolerance": 1e-05
+      }
+    },
+    {
+      "name": "classical-integer-dataflow",
+      "source": "classical-dataflow.qasm",
+      "args": ["--clifford-t", "--json"],
+      "expect": {
+        "format": "json",
+        "subset": {
+          "analysis": "dynamic",
+          "bounds": "conservative",
+          "width": 1,
+          "t-count": {"lower": 0, "upper": 0},
+          "measurements": {"lower": 1, "upper": 2},
+          "resets": {"lower": 1, "upper": 2}
+        }
+      }
+    }
+  ]
+}
