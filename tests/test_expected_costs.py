@@ -393,7 +393,7 @@ class ExpectedCostBudgetTests(unittest.TestCase):
                 self.assertEqual(expected(result, 't-count'), Fraction(1, 2))
                 self.assertNotIn('depth', result['expected-counts'])
             else:
-                self.assertIn('t-count: 1/2', process.stdout)
+                self.assertIn('t-count: 0 + 1/2', process.stdout)
                 self.assertIn('Depth is not estimated', process.stdout)
 
 
