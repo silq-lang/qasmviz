@@ -316,26 +316,33 @@ def collect_dynamic_costs(program):
 
 
 def print_dynamic_costs(costs):
+    metrics = ('gate-count', 't-count', 'cx-count', '2q-count', 'measurements', 'resets')
     print(f"width: {costs['width']}")
     print('Execution-count bounds (conservative):')
-    for key in ('gate-count', 't-count', 'cx-count', '2q-count', 'measurements', 'resets'):
+    for key in metrics:
         if key not in costs:
             continue
         low, high = costs[key]['lower'], costs[key]['upper']
         value = f'{low}..unknown' if high is None else (str(low) if low == high else f'{low}..{high}')
         print(f'  {key}: {value}')
     expected = costs.get('expected-counts')
+    rows = []
     if expected is not None:
-        print('Expected execution counts (exact where known; qubits initially zero):')
-        for key in ('gate-count', 't-count', 'cx-count', '2q-count', 'measurements', 'resets'):
-            if key not in expected:
-                continue
-            value = expected[key]
+        for key in metrics:
+            value = expected.get(key)
             if value is None:
-                text = 'unknown'
-            else:
-                numerator, denominator = value['numerator'], value['denominator']
-                text = str(numerator) if denominator == 1 else f'{numerator}/{denominator}'
+                continue
+            numerator, denominator = value['numerator'], value['denominator']
+            bound = costs.get(key)
+            if (bound is not None and bound['lower'] == bound['upper']
+                    and numerator == bound['lower'] * denominator):
+                continue
+            whole, remainder = divmod(numerator, denominator)
+            text = str(whole) if not remainder else f'{whole} + {remainder}/{denominator}'
+            rows.append((key, text))
+    if rows:
+        print('Expected execution counts (qubits initially zero):')
+        for key, text in rows:
             print(f'  {key}: {text}')
         if 'reason' in expected:
             print('Expected-count analysis stopped: ' + expected['reason'] + '.')
