@@ -1,0 +1,1560 @@
+diff --git a/qasmviz_expected.py b/qasmviz_expected.py
+index 183033f..3502a8b 100644
+--- a/qasmviz_expected.py
++++ b/qasmviz_expected.py
+@@ -5,9 +5,10 @@ Paulis with coefficients in Q(sqrt(2)). All work limits are shared by one
+ analysis, including classical execution and every probability query.
+ """
+ 
+-from dataclasses import dataclass, field
++from dataclasses import dataclass, field, replace
+ from fractions import Fraction
+ from functools import lru_cache
++import math
+ 
+ 
+ class NotEasy(ValueError):
+@@ -20,9 +21,10 @@ class SymbolicPhase(NotEasy):
+ 
+ @dataclass(frozen=True)
+ class Limits:
+-    steps: int = 10000
++    steps: int | None = None
++    steps_per_input: int = 64
+     paths: int = 64
+-    history: int = 512
++    history: int | None = None
+     terms: int = 32
+     qubits: int = 4096
+     iterations: int = 64
+@@ -36,9 +38,22 @@ class Budget:
+     limits: Limits = field(default_factory=Limits)
+     steps: int = 0
+     paths: int = 1
++    input_size: int = 0
++
++    @property
++    def step_limit(self):
++        return (self.limits.steps if self.limits.steps is not None else
++                256 + self.limits.steps_per_input * self.input_size)
++
++    @property
++    def remaining(self):
++        return self.step_limit - self.steps
++
++    def input(self, count=1):
++        self.input_size += count
+ 
+     def spend(self, count=1):
+-        if self.steps + count > self.limits.steps:
++        if self.steps + count > self.step_limit:
+             raise NotEasy('analysis work limit reached')
+         self.steps += count
+ 
+@@ -58,6 +73,24 @@ class Event:
+     kind: str
+     wires: tuple
+     value: object = None
++    known: tuple | None = None
++
++
++@dataclass(frozen=True)
++class History:
++    event: Event
++    previous: object
++    length: int
++
++    def __len__(self):
++        return self.length
++
++    def __reversed__(self):
++        node = self
++        while isinstance(node, History):
++            yield node.event
++            node = node.previous
++        yield from reversed(node)
+ 
+ 
+ @dataclass
+@@ -66,12 +99,15 @@ class Path:
+     values: dict = field(default_factory=dict)
+     scopes: list = field(default_factory=list)
+     counts: dict = field(default_factory=dict)
+-    history: tuple = ()
++    history: object = ()
+     exit: str = 'normal'
++    facts: object = None
++    track: bool = True
+ 
+     def copy(self):
+         return Path(self.probability, dict(self.values), [dict(s) for s in self.scopes],
+-                    dict(self.counts), self.history, self.exit)
++                    dict(self.counts), self.history, self.exit,
++                    self.facts.copy() if self.facts is not None else None, self.track)
+ 
+     def count(self, name, value=1):
+         old = self.counts.get(name, 0)
+@@ -79,9 +115,15 @@ class Path:
+ 
+     def record(self, event, budget):
+         budget.spend()
+-        if len(self.history) >= budget.limits.history:
++        if budget.limits.history is not None and len(self.history) >= budget.limits.history:
+             raise NotEasy('quantum history limit reached')
+-        self.history += (event,)
++        if self.track:
++            if self.facts is None:
++                from qasmviz_expected_basis import BasisFacts
++                self.facts = BasisFacts()
++            self.facts.apply(event, self.history, budget)
++            event = replace(event, known=(self.facts.unknown, self.facts.ones))
++        self.history = History(event, self.history, len(self.history) + 1)
+ 
+ 
+ ONE = (Fraction(1), Fraction(0))
+@@ -106,6 +148,19 @@ def _scale(value, factor):
+     return value[0] * factor, value[1] * factor
+ 
+ 
++def reduce_known(terms, known, budget):
++    if known is None:
++        return terms
++    unknown, ones = known
++    output = {}
++    for (x, z), coefficient in terms.items():
++        budget.spend()
++        if not x & ~unknown:
++            sign = -1 if (z & ones).bit_count() % 2 else 1
++            _add_term(output, (x, z & unknown), _scale(coefficient, sign), budget)
++    return output
++
++
+ @lru_cache(maxsize=32)
+ def _clifford_action(name, arity):
+     # The existing named-gate tables contain signed, exact tableau actions.
+@@ -128,6 +183,20 @@ _CCX = (
+ )
+ _DIAGONAL = frozenset(('diagonal', 'rz', 'p', 'u1', 'cp', 'cu1', 'crz', 'cs', 'csdg', 'ccz'))
+ _AXES = {'rx': 'x', 'ry': 'y', 'rxx': 'xx', 'ryy': 'yy', 'rzz': 'zz', 'rzx': 'zx'}
++_QUARTERS = {k * math.pi / 4: k % 8 for k in range(-8, 9)}
++_PHASE_WORDS = ((), ('t',), ('s',), ('s', 't'), ('z',), ('z', 't'), ('sdg',), ('tdg',))
++
++
++def canonical_phase(name, wires, angle):
++    """Interpret exactly matching canonical pi literals; never use a tolerance."""
++    if not isinstance(angle, (int, float)) or angle not in _QUARTERS:
++        return None
++    quarter = _QUARTERS[angle]
++    if name in ('p', 'u1', 'rz'):
++        return tuple(Event('gate', tuple(wires), (word,)) for word in _PHASE_WORDS[quarter]), quarter % 2
++    if name in ('cp', 'cu1') and quarter in (0, 4):
++        return (() if quarter == 0 else (Event('gate', tuple(wires), ('cz',)),)), 0
++    return None
+ 
+ 
+ def _pull_gate(terms, name, wires, budget):
+@@ -187,32 +256,52 @@ def _pull_gate(terms, name, wires, budget):
+     return output
+ 
+ 
++def _pull_event(terms, event, budget):
++    if event.kind == 'gate':
++        return _pull_gate(terms, event.value[0], event.wires, budget)
++    if event.kind == 'instrument':
++        common, branches = event.value
++        output = {}
++        for outcome, branch in enumerate(branches):
++            pulled = terms
++            for item in reversed(branch):
++                pulled = _pull_event(pulled, item, budget)
++            for item in reversed(common):
++                pulled = _pull_event(pulled, item, budget)
++            # Unnormalized projectors sum to the complete, trace-preserving
++            # measurement/feedback channel. Do not divide by outcome odds.
++            pulled = _pull_event(pulled, Event('measure', event.wires, (outcome, Fraction(1))), budget)
++            for word, value in pulled.items():
++                _add_term(output, word, value, budget)
++        return output
++    output = {}
++    bit = 1 << event.wires[0]
++    for (x, z), coefficient in terms.items():
++        budget.spend()
++        if x & bit:
++            continue
++        if event.kind == 'reset':
++            _add_term(output, (x, z & ~bit), coefficient, budget)
++        elif event.kind == 'discard':
++            _add_term(output, (x, z), coefficient, budget)
++        else:
++            outcome, probability = event.value
++            value = _scale(coefficient, 1 / (2 * probability))
++            _add_term(output, (x, z), value, budget)
++            _add_term(output, (x, z ^ bit), _scale(value, -1 if outcome else 1), budget)
++    return output
++
++
+ def _rational_probability(history, wire, budget):
+     terms = {(0, 1 << wire): ONE}
+     constant = ZERO
+     for event in reversed(history):
++        terms = reduce_known(terms, event.known, budget)
+         identity = terms.pop((0, 0), ZERO)
+         constant = constant[0] + identity[0], constant[1] + identity[1]
+         if not terms:
+             break
+-        if event.kind == 'gate':
+-            name, = event.value
+-            terms = _pull_gate(terms, name, event.wires, budget)
+-            continue
+-        output = {}
+-        bit = 1 << event.wires[0]
+-        for (x, z), coefficient in terms.items():
+-            budget.spend()
+-            if x & bit:
+-                continue  # Projection/reset removes X and Y components.
+-            if event.kind == 'reset':
+-                _add_term(output, (x, z & ~bit), coefficient, budget)
+-            else:
+-                outcome, probability = event.value
+-                value = _scale(coefficient, 1 / (2 * probability))
+-                _add_term(output, (x, z), value, budget)
+-                _add_term(output, (x, z ^ bit), _scale(value, -1 if outcome else 1), budget)
+-        terms = output
++        terms = _pull_event(terms, event, budget)
+     # Every declared qubit starts in |0>. X/Y terms have zero expectation.
+     expectation = constant
+     for (x, _), value in terms.items():
+@@ -235,6 +324,7 @@ def _zero_expectation(history, wire, budget):
+     is assumed. This covers function ancillas even with arbitrary phase gates.
+     """
+     words = {(0, 1 << wire)}
++    history = list(reversed(tuple(reversed(history))))
+     touched, prefix_masks = 0, []
+     for event in history:
+         budget.spend(len(event.wires))
+@@ -245,6 +335,11 @@ def _zero_expectation(history, wire, budget):
+         output = set()
+         for x, z in words:
+             budget.spend()
++            if event.known is not None:
++                unknown, _ = event.known
++                if x & ~unknown:
++                    continue
++                z &= unknown
+             # An untouched input wire is still an independent |0>. Its X/Y
+             # factor proves zero regardless of operations on the other wires.
+             if x & ~prefix_masks[index]:
+@@ -266,9 +361,14 @@ def _zero_expectation(history, wire, budget):
+                         images.append((x ^ ax, z ^ az))
+                 else:
+                     images = _pull_gate({(x, z): ONE}, name, event.wires, budget)
++            elif event.kind == 'instrument':
++                # The exact channel may itself prove zero. Symbolic phases
++                # within a feedback channel conservatively stop this proof.
++                images = _pull_event({(x, z): ONE}, event, budget)
+             else:
+                 bit = 1 << event.wires[0]
+                 images = [] if x & bit else ([(x, z & ~bit)] if event.kind == 'reset'
++                                             else [(x, z)] if event.kind == 'discard'
+                                              else [(x, z), (x, z ^ bit)])
+             for word in images:
+                 budget.spend()
+@@ -285,6 +385,8 @@ def _zero_expectation(history, wire, budget):
+ 
+ def probability_one(history, wire, budget):
+     """Return an exact rational Born probability, or stop this analysis."""
++    if not budget.input_size:
++        budget.input(len(history))
+     try:
+         return _rational_probability(history, wire, budget)
+     except SymbolicPhase:
+@@ -294,7 +396,9 @@ def probability_one(history, wire, budget):
+ 
+ 
+ def measure(path, wire, budget):
+-    probability = probability_one(path.history, wire, budget)
++    probability = path.facts.probability(wire) if path.facts is not None else None
++    if probability is None:
++        probability = probability_one(path.history, wire, budget)
+     outcomes = [(bit, probability if bit else 1 - probability) for bit in (0, 1)]
+     outcomes = [(bit, p) for bit, p in outcomes if p]
+     if len(outcomes) == 2:
+@@ -305,6 +409,8 @@ def measure(path, wire, budget):
+             branch = path
+         else:
+             budget.spend(len(path.values) + len(path.counts) + sum(map(len, path.scopes)))
++            if path.facts is not None:
++                budget.spend(path.facts.copy_size())
+             branch = path.copy()
+         branch.probability *= p
+         branch.count('measurements')
+diff --git a/qasmviz_expected_basis.py b/qasmviz_expected_basis.py
+new file mode 100644
+index 0000000..4d1d344
+--- /dev/null
++++ b/qasmviz_expected_basis.py
+@@ -0,0 +1,245 @@
++"""Small forward facts that keep uncomputation proofs local.
++
++Affine expressions describe computational-basis support, not amplitudes.
++Function facts have physical witness wires and are invalidated when those
++wires change. Bounded local Pauli proofs recognize computed function ancillas.
++"""
++
++from fractions import Fraction
++
++
++_DIAGONAL = frozenset(('id', 'z', 's', 'sdg', 't', 'tdg', 'rz', 'p', 'u1', 'cp',
++                       'cu1', 'cz', 'cs', 'csdg', 'crz', 'ccz', 'diagonal'))
++
++
++def writes(event):
++    if event.kind != 'gate':
++        return set(event.wires)
++    name, = event.value
++    if name in _DIAGONAL:
++        return set()
++    if name in ('cx', 'cy', 'ccx'):
++        return {event.wires[-1]}
++    return set(event.wires)
++
++
++class BasisFacts:
++    def __init__(self):
++        self.expressions = {}
++        self.atoms = {}
++        self.functions = {}
++        self.users = {}
++        self.candidates = {}
++        self.fair = set()
++        self.unknown = self.ones = self.next_variable = 0
++
++    def copy(self):
++        other = BasisFacts()
++        other.expressions = dict(self.expressions)
++        other.atoms = dict(self.atoms)
++        other.functions = dict(self.functions)
++        other.users = {q: set(users) for q, users in self.users.items()}
++        other.candidates = dict(self.candidates)
++        other.fair = set(self.fair)
++        other.unknown, other.ones, other.next_variable = self.unknown, self.ones, self.next_variable
++        return other
++
++    def copy_size(self):
++        return (len(self.expressions) + len(self.atoms) + len(self.functions) + len(self.candidates)
++                + len(self.fair) + sum(map(len, self.users.values())))
++
++    def expression(self, q):
++        return self.expressions.get(q, frozenset())
++
++    def function(self, q):
++        return self.functions.get(q) if self.unknown & (1 << q) else frozenset()
++
++    def probability(self, q):
++        if not self.unknown & (1 << q):
++            return Fraction(bool(self.ones & (1 << q)))
++        return Fraction(1, 2) if q in self.fair else None
++
++    def _remove(self, q, budget):
++        for witness in self.functions.pop(q, ()):
++            budget.spend()
++            self.users[witness].discard(q)
++
++    def _invalidate(self, q, budget):
++        for dependent in tuple(self.users.get(q, ())):
++            self._remove(dependent, budget)
++        self._remove(q, budget)
++        self.fair.discard(q)
++
++    def _function(self, q, witnesses, budget):
++        if witnesses is None or q in witnesses or len(witnesses) > 32:
++            return
++        self.functions[q] = frozenset(witnesses)
++        for witness in witnesses:
++            budget.spend()
++            self.users.setdefault(witness, set()).add(q)
++
++    def _fresh(self):
++        self.next_variable += 1
++        return frozenset((self.next_variable,))
++
++    def _atom(self, expression):
++        # A control contributes its current value as one opaque symbol. Do not
++        # expand a ripple carry's entire XOR ancestry on every use. Equal
++        # expressions share a symbol, so compute/uncompute cancellation stays
++        # exact. Symbols may be correlated; we never assume independence.
++        if len(expression) <= 1:
++            return expression
++        if expression not in self.atoms:
++            self.atoms[expression] = self._fresh()
++        return self.atoms[expression]
++
++    def _set(self, q, expression):
++        self.expressions[q] = expression
++        bit = 1 << q
++        if expression <= {0}:
++            self.unknown &= ~bit
++            self.ones = (self.ones | bit) if expression else (self.ones & ~bit)
++        else:
++            self.unknown |= bit
++            self.ones &= ~bit
++
++    def _change(self, q, expression, witnesses, budget):
++        self._invalidate(q, budget)
++        self._set(q, expression if len(expression) <= 32 else self._atom(expression))
++        self._function(q, witnesses, budget)
++
++    def apply(self, event, history, budget):
++        if event.kind == 'reset':
++            self.candidates.pop(event.wires[0], None)
++            self._change(event.wires[0], frozenset(), frozenset(), budget)
++            return
++        if event.kind == 'measure':
++            outcome, _ = event.value
++            self.fair.clear()  # Conditioning may change other marginal probabilities.
++            self.candidates.pop(event.wires[0], None)
++            self._change(event.wires[0], frozenset((0,)) if outcome else frozenset(), frozenset(), budget)
++            return
++        if event.kind == 'discard':
++            return  # Unconditional Z measurement preserves basis support.
++        if event.kind == 'instrument':
++            common, branches = event.value
++            for item in common:
++                self.apply(item, history, budget)
++            changed = set()
++            for branch in branches:
++                for item in branch:
++                    budget.spend()
++                    changed.update(writes(item))
++            for q in changed:
++                self._change(q, self._fresh(), None, budget)
++            return
++        name, = event.value
++        if name in _DIAGONAL:
++            return
++        wires = event.wires
++        if name in ('x', 'y'):
++            q = wires[0]
++            self._change(q, self.expression(q) ^ {0}, self.function(q), budget)
++        elif name in ('cx', 'cy'):
++            c, q = wires
++            old = self.function(q)
++            budget.spend(len(self.expression(c)) + len(self.expression(q)))
++            control, target = self._atom(self.expression(c)), self.expression(q)
++            value = frozenset() if control == self._atom(target) else target ^ control
++            self._change(q, value,
++                         None if old is None else old | {c}, budget)
++        elif name == 'ccx':
++            a, b, q = wires
++            old = self.function(q)
++            ae, be, qe = self._atom(self.expression(a)), self._atom(self.expression(b)), self.expression(q)
++            value = qe if not ae or not be else (qe ^ be if ae == {0} else qe ^ ae if be == {0} else self._fresh())
++            self._change(q, value, None if old is None else old | {a, b}, budget)
++        elif name == 'h':
++            q = wires[0]
++            is_function = self.function(q) is not None
++            was_known = not self.unknown & (1 << q)
++            candidate = self.candidates.get(q)
++            before = (history, (self.unknown, self.ones))
++            self._change(q, self._fresh(), None, budget)
++            self.candidates.pop(q, None)
++            if is_function:
++                self.fair.add(q)
++            if candidate is not None:
++                relation = self._recognize(q, event, history, candidate, budget)
++                if relation is not None:
++                    witnesses, constant = relation
++                    self._function(q, witnesses, budget)
++                    if constant is not None:
++                        self._set(q, frozenset((0,)) if constant else frozenset())
++                    self.fair.discard(q)
++            if was_known:
++                self.candidates[q] = before
++        else:
++            for q in wires:
++                self._change(q, self._fresh(), None, budget)
++
++    @staticmethod
++    def _recognize(q, closing, history, candidate, budget):
++        from qasmviz_expected import History, NotEasy, ONE, _pull_gate, reduce_known
++        boundary, initial = candidate
++        if len(history) - len(boundary) > 32:
++            return None
++        events = [closing]
++        node = history
++        while node is not boundary:
++            if not isinstance(node, History) or node.event.kind != 'gate':
++                return None
++            events.append(node.event)
++            node = node.previous
++        # Scheduling may interleave preparation of a later input/scratch wire
++        # with this gadget. Move operations disjoint from the prefix before
++        # the opening H; they commute with that entire prefix. Their recorded
++        # basis constants then belong to the local proof's initial boundary.
++        active, local = {q}, []
++        unknown, ones = initial
++        for event in reversed(events):
++            budget.spend()
++            if active.intersection(event.wires):
++                active.update(event.wires)
++                local.append(event)
++            else:
++                if event.known is None:
++                    return None
++                mask = sum(1 << wire for wire in event.wires)
++                unknown = (unknown & ~mask) | (event.known[0] & mask)
++                ones = (ones & ~mask) | (event.known[1] & mask)
++        events, initial = list(reversed(local)), (unknown, ones)
++        touched = set(q for event in events for q in event.wires)
++        if len(touched) > 5:
++            return None
++        terms = {(0, 1 << q): ONE}
++        try:
++            for event in events:
++                terms = _pull_gate(terms, event.value[0], event.wires, budget)
++            terms = reduce_known(terms, initial, budget)
++        except NotEasy as exc:
++            # Optional local recognition must not swallow a global work limit.
++            if 'work limit' in str(exc):
++                raise
++            return None
++        if any(x for x, _ in terms):
++            return None
++        support = 0
++        for _, z in terms:
++            support |= z
++        witnesses = [wire for wire in touched if support & (1 << wire)]
++        if len(witnesses) > 3 or any(set(witnesses) & writes(event) for event in events):
++            return None
++        truth = []
++        for assignment in range(1 << len(witnesses)):
++            bits = sum(1 << wire for i, wire in enumerate(witnesses) if (assignment >> i) & 1)
++            a = b = Fraction()
++            for (_, z), value in terms.items():
++                budget.spend()
++                sign = -1 if (z & bits).bit_count() % 2 else 1
++                a += sign * value[0]
++                b += sign * value[1]
++            if b or a not in (-1, 1):
++                return None
++            truth.append(int(a == -1))
++        return frozenset(witnesses), truth[0] if len(set(truth)) == 1 else None
+diff --git a/qasmviz_expected_circuit.py b/qasmviz_expected_circuit.py
+index 5d12a60..e2119ac 100644
+--- a/qasmviz_expected_circuit.py
++++ b/qasmviz_expected_circuit.py
+@@ -9,7 +9,8 @@ from qiskit.circuit import (
+ from qiskit.circuit.classical import expr, types
+ from qiskit.circuit.library import GlobalPhaseGate, get_standard_gate_name_mapping
+ 
+-from qasmviz_expected import Event, NotEasy, Path, gate, measure
++from qasmviz_expected import Event, NotEasy, Path, canonical_phase, gate, measure
++from qasmviz_expected_stream import Choice, Quantum, Sample, UnsupportedStream, execute, plan
+ 
+ 
+ _STANDARD = get_standard_gate_name_mapping()
+@@ -29,7 +30,8 @@ class Executor:
+         while pending:
+             circuit, depth = pending.pop()
+             self.budget.depth(depth)
+-            if len(circuit.data) > self.budget.limits.steps - self.budget.steps:
++            self.budget.input(len(circuit.data))
++            if len(circuit.data) > self.budget.remaining:
+                 raise NotEasy('analysis work limit reached')
+             for instruction in circuit.data:
+                 self.budget.spend()
+@@ -44,17 +46,84 @@ class Executor:
+                     if count > self.budget.limits.iterations:
+                         raise NotEasy('loop iteration limit reached')
+                 if isinstance(operation, ControlFlowOp):
+-                    if len(operation.blocks) > self.budget.limits.steps - self.budget.steps:
++                    if len(operation.blocks) > self.budget.remaining:
+                         raise NotEasy('analysis work limit reached')
+                     pending.extend((block, depth + 1) for block in operation.blocks)
+ 
+     def run(self):
+         self.preflight()
++        self.budget.input(self.circuit.num_qubits + self.circuit.num_clbits)
+         self.budget.spend(self.circuit.num_qubits + self.circuit.num_clbits)
+         qmap = {q: i for i, q in enumerate(self.circuit.qubits)}
+         cmap = {c: i for i, c in enumerate(self.circuit.clbits)}
++        try:
++            stream = plan(self.stream(qmap, cmap), self.budget)
++        except UnsupportedStream:
++            pass
++        else:
++            return execute(stream, self.budget)
+         return self.block(self.circuit, [Path()], qmap, cmap)
+ 
++    def condition_bit(self, condition, cmap, depth=0):
++        """Accept a single bit, its negation, or equality to a Boolean."""
++        self.budget.spend()
++        self.budget.depth(depth)
++        if isinstance(condition, Clbit):
++            return cmap[condition], True
++        if isinstance(condition, ClassicalRegister) and len(condition) == 1:
++            return cmap[condition[0]], True
++        if isinstance(condition, tuple) and condition[1] in (0, 1):
++            key, polarity = self.condition_bit(condition[0], cmap, depth + 1)
++            return key, polarity == bool(condition[1])
++        if isinstance(condition, expr.Var):
++            return self.condition_bit(condition.var, cmap, depth + 1)
++        if isinstance(condition, expr.Unary) and condition.op.name == 'LOGIC_NOT':
++            key, polarity = self.condition_bit(condition.operand, cmap, depth + 1)
++            return key, not polarity
++        if isinstance(condition, expr.Binary) and condition.op.name in ('EQUAL', 'NOT_EQUAL'):
++            left, right = condition.left, condition.right
++            if isinstance(left, expr.Value):
++                left, right = right, left
++            if isinstance(right, expr.Value) and right.value in (0, 1):
++                key, polarity = self.condition_bit(left, cmap, depth + 1)
++                return key, (polarity == bool(right.value)) == (condition.op.name == 'EQUAL')
++        raise UnsupportedStream()
++
++    def quantum(self, instructions, qmap, cmap):
++        path = Path(track=False)
++        for instruction in instructions:
++            self.budget.spend()
++            operation = instruction.operation
++            if isinstance(operation, (ControlFlowOp, Store, Measure)):
++                raise UnsupportedStream()
++            self.instruction(instruction, path, qmap, cmap, 0)
++        return Quantum.capture(path)
++
++    def stream(self, qmap, cmap):
++        items = []
++        for instruction in self.circuit.data:
++            self.budget.spend()
++            operation = instruction.operation
++            if operation.base_class is Measure:
++                if len(instruction.qubits) != 1 or len(instruction.clbits) != 1:
++                    raise UnsupportedStream()
++                items.append(Sample(qmap[instruction.qubits[0]], cmap[instruction.clbits[0]]))
++            elif isinstance(operation, IfElseOp):
++                key, polarity = self.condition_bit(operation.condition, cmap)
++                branches = []
++                for block in operation.blocks:
++                    branches.append(self.quantum(block.data,
++                        {q: qmap[outer] for q, outer in zip(block.qubits, instruction.qubits)},
++                        {c: cmap[outer] for c, outer in zip(block.clbits, instruction.clbits)}))
++                if len(branches) == 1:
++                    branches.append(Quantum((), {}))
++                items.append(Choice(key, tuple(reversed(branches)) if polarity else tuple(branches)))
++            else:
++                item = self.quantum((instruction,), qmap, cmap)
++                if item.events or item.counts:
++                    items.append(item)
++        return items
++
+     def read(self, value, path, cmap, depth=0):
+         self.budget.spend()
+         self.budget.depth(depth)
+@@ -216,7 +285,9 @@ class Executor:
+         name = canonical if standard is not None and operation.base_class is standard.base_class else 'unsupported:' + operation.name
+         path.count('gate-count')
+         path.count('gate:' + operation.name)
+-        path.count('t-count', self.t_cost(operation))
++        normalized = (canonical_phase(name, wires, operation.params[0])
++                      if len(operation.params) == 1 else None)
++        path.count('t-count', normalized[1] if normalized is not None else self.t_cost(operation))
+         if len(wires) == 2:
+             path.count('2q-count')
+         if operation.name == 'cx':
+@@ -226,7 +297,11 @@ class Executor:
+             open_controls = [wires[i] for i in range(operation.num_ctrl_qubits) if not (operation.ctrl_state >> i) & 1]
+         for wire in open_controls:
+             gate(path, 'x', (wire,), self.budget, None, count=False)
+-        gate(path, name, wires, self.budget, None, count=False)
++        if normalized is None:
++            gate(path, name, wires, self.budget, None, count=False)
++        else:
++            for event in normalized[0]:
++                path.record(event, self.budget)
+         for wire in reversed(open_controls):
+             gate(path, 'x', (wire,), self.budget, None, count=False)
+         return [path]
+diff --git a/qasmviz_expected_qasm.py b/qasmviz_expected_qasm.py
+index cbafadf..a39d439 100644
+--- a/qasmviz_expected_qasm.py
++++ b/qasmviz_expected_qasm.py
+@@ -11,6 +11,7 @@ from openqasm3 import ast
+ 
+ from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator, Scalar
+ from qasmviz_expected import Event, NotEasy, Path, gate, measure
++from qasmviz_expected_stream import Choice, Quantum, Sample, UnsupportedStream, execute, plan
+ from qasmviz_loops import iterations
+ 
+ 
+@@ -123,8 +124,13 @@ class Executor:
+         pending = [(self.program, 0)]
+         while pending:
+             node, depth = pending.pop()
++            self.budget.input()
+             self.budget.spend()
+             self.budget.depth(depth)
++            if isinstance(node, ast.QubitDeclaration) and isinstance(node.size, ast.IntegerLiteral):
++                self.budget.input(min(max(0, node.size.value), self.budget.limits.qubits))
++            if isinstance(node, ast.BitType) and isinstance(node.size, ast.IntegerLiteral):
++                self.budget.input(min(max(0, node.size.value), self.budget.limits.integer_bits))
+             if isinstance(node, (ast.WhileLoop, ast.ExternDeclaration, ast.SubroutineDefinition,
+                                  ast.FunctionCall, ast.IODeclaration)):
+                 raise NotEasy(f'unsupported expectation construct: {type(node).__name__}')
+@@ -139,17 +145,82 @@ class Executor:
+             if isinstance(node, ast.QASMNode):
+                 pending.extend((getattr(node, f.name), depth + 1) for f in fields(node) if f.name != 'span')
+             elif isinstance(node, (list, tuple)):
+-                if len(node) > self.budget.limits.steps - self.budget.steps:
++                self.budget.input(len(node))
++                if len(node) > self.budget.remaining:
+                     raise NotEasy('analysis work limit reached')
+                 pending.extend((item, depth) for item in node)
+ 
+     def run(self):
+         try:
+             self.preflight()
++            try:
++                stream = plan(self.stream(), self.budget)
++            except UnsupportedStream:
++                self.qubits, self.definitions = 0, {}
++            else:
++                return execute(stream, self.budget)
+             return self.block(self.program.statements, [Path()])
+         except ConstantEvaluationError as exc:
+             raise NotEasy(f'unsupported classical evaluation: {exc}') from exc
+ 
++    def bit_key(self, node, path):
++        name, indices = selected(node, path, self.budget)
++        if not isinstance(path.values[name].type, ast.BitType) or len(indices) != 1:
++            raise UnsupportedStream()
++        return name, indices[0]
++
++    def condition_bit(self, node, path):
++        self.budget.spend()
++        if isinstance(node, (ast.Identifier, ast.IndexExpression)):
++            return self.bit_key(node, path), True
++        if isinstance(node, ast.UnaryExpression) and node.op.name == '!':
++            key, polarity = self.condition_bit(node.expression, path)
++            return key, not polarity
++        if isinstance(node, ast.BinaryExpression) and node.op.name in ('==', '!='):
++            left, right = node.lhs, node.rhs
++            if isinstance(left, (ast.BooleanLiteral, ast.IntegerLiteral)):
++                left, right = right, left
++            if isinstance(right, (ast.BooleanLiteral, ast.IntegerLiteral)) and right.value in (0, 1):
++                key, polarity = self.condition_bit(left, path)
++                return key, (polarity == bool(right.value)) == (node.op.name == '==')
++        raise UnsupportedStream()
++
++    def quantum(self, statements, path):
++        for statement in statements:
++            self.budget.spend()
++            if not isinstance(statement, (ast.QuantumGate, ast.QuantumPhase, ast.QuantumReset,
++                                          ast.QuantumBarrier, ast.Include)):
++                raise UnsupportedStream()
++            self.statement(statement, path, 0)
++        return Quantum.capture(path)
++
++    def stream(self):
++        path, items = Path(track=False), []
++        for statement in self.program.statements:
++            self.budget.spend()
++            if isinstance(statement, (ast.QubitDeclaration, ast.QuantumGateDefinition, ast.AliasStatement)):
++                self.statement(statement, path, 0)
++            elif isinstance(statement, ast.ClassicalDeclaration):
++                if not isinstance(statement.type, ast.BitType) or statement.init_expression is not None:
++                    raise UnsupportedStream()
++                self.statement(statement, path, 0)
++            elif isinstance(statement, ast.QuantumMeasurementStatement):
++                wires = self.wires(statement.measure.qubit, path)
++                if len(wires) != 1:
++                    raise UnsupportedStream()
++                key = self.bit_key(statement.target, path) if statement.target is not None else None
++                items.append(Sample(wires[0], key))
++            elif isinstance(statement, ast.BranchingStatement):
++                key, polarity = self.condition_bit(statement.condition, path)
++                yes = self.quantum(statement.if_block, path)
++                no = self.quantum(statement.else_block, path)
++                items.append(Choice(key, (no, yes) if polarity else (yes, no)))
++            else:
++                item = self.quantum((statement,), path)
++                if item.events or item.counts:
++                    items.append(item)
++        return items
++
+     def bind(self, path, name, cell):
+         if path.scopes and name not in path.scopes[-1]:
+             path.scopes[-1][name] = path.values.get(name)
+diff --git a/qasmviz_expected_stream.py b/qasmviz_expected_stream.py
+new file mode 100644
+index 0000000..0c96974
+--- /dev/null
++++ b/qasmviz_expected_stream.py
+@@ -0,0 +1,110 @@
++"""Eliminate single-use measurement results without enumerating outcome paths.
++
++Each matched measurement and correction becomes its unconditional quantum
++channel. This preserves correlations with later measurements. Only the cost
++of this correction uses its marginal probability; no independence is assumed.
++"""
++
++from dataclasses import dataclass
++
++from qasmviz_expected import Event, Path, probability_one
++
++
++class UnsupportedStream(Exception):
++    """Use the bounded classical executor for this control-flow structure."""
++
++
++@dataclass
++class Quantum:
++    events: tuple
++    counts: dict
++
++    @classmethod
++    def capture(cls, path):
++        result = cls(tuple(reversed(tuple(reversed(path.history)))), path.counts)
++        path.history, path.counts = (), {}
++        return result
++
++
++@dataclass
++class Sample:
++    wire: int
++    key: object
++
++
++@dataclass
++class Choice:
++    key: object
++    branches: tuple  # false, true
++
++
++def plan(items, budget):
++    """Check all result lifetimes before doing any probability work."""
++    versions, uses, origins = {}, {}, {}
++    for index, item in enumerate(items):
++        budget.spend()
++        if isinstance(item, Sample):
++            if item.key is not None:
++                versions[item.key] = index
++        elif isinstance(item, Choice):
++            origin = versions.get(item.key)
++            if origin is None:
++                raise UnsupportedStream()
++            origins[index] = origin
++            uses[origin] = uses.get(origin, 0) + 1
++    output, index = [], 0
++    while index < len(items):
++        budget.spend()
++        item = items[index]
++        if isinstance(item, Quantum):
++            output.append(item)
++            index += 1
++            continue
++        if not isinstance(item, Sample) or uses.get(index, 0) > 1:
++            raise UnsupportedStream()
++        if not uses.get(index, 0):
++            output.append(Quantum((Event('discard', (item.wire,)),), {'measurements': 1}))
++            index += 1
++            continue
++        next_index, common = index + 1, Quantum((), {})
++        if next_index < len(items) and isinstance(items[next_index], Quantum):
++            candidate = items[next_index]
++            if candidate.events == (Event('reset', (item.wire,)),):
++                common = candidate
++                next_index += 1
++        if origins.get(next_index) != index:
++            raise UnsupportedStream()
++        output.append((item.wire, common, items[next_index].branches))
++        index = next_index + 1
++    return output
++
++
++def _count(path, counts, probability=1):
++    if not probability:
++        return
++    for name, count in counts.items():
++        path.count(name, None if count is None else probability * count)
++
++
++def execute(items, budget):
++    path = Path()
++    for item in items:
++        budget.spend()
++        if isinstance(item, Quantum):
++            _count(path, item.counts)
++            for event in item.events:
++                path.record(event, budget)
++            continue
++        wire, common, branches = item
++        probability = path.facts.probability(wire) if path.facts is not None else None
++        if probability is None:
++            probability = probability_one(path.history, wire, budget)
++        path.count('measurements')
++        _count(path, common.counts)
++        for outcome, branch in enumerate(branches):
++            _count(path, branch.counts, probability if outcome else 1 - probability)
++        touched = {q for event in common.events for q in event.wires}
++        touched.update(q for branch in branches for event in branch.events for q in event.wires)
++        path.record(Event('instrument', (wire,) + tuple(sorted(touched - {wire})),
++                          (common.events, tuple(branch.events for branch in branches))), budget)
++    return [path]
+diff --git a/tests/circuits/adder-31.qasm b/tests/circuits/adder-31.qasm
+new file mode 100644
+index 0000000..aecca90
+--- /dev/null
++++ b/tests/circuits/adder-31.qasm
+@@ -0,0 +1,290 @@
++include "stdgates.inc";
++bit m0;
++bit m1;
++bit m2;
++bit m3;
++bit m4;
++bit m5;
++bit m6;
++bit m7;
++bit m8;
++qubit[31] q;
++
++h q[0];
++h q[1];
++h q[2];
++h q[3];
++h q[4];
++h q[5];
++h q[6];
++h q[7];
++h q[8];
++h q[9];
++h q[10];
++h q[11];
++h q[12];
++h q[13];
++h q[14];
++h q[15];
++h q[16];
++h q[17];
++h q[18];
++h q[19];
++h q[20];
++p(0.7853981633974483) q[20];
++cx q[10], q[20];
++cx q[0], q[20];
++cx q[10], q[21];
++cx q[20], q[21];
++cx q[0], q[22];
++cx q[20], q[22];
++p(-0.7853981633974483) q[21];
++p(-0.7853981633974483) q[22];
++p(0.7853981633974483) q[20];
++cx q[10], q[21];
++cx q[20], q[21];
++cx q[0], q[22];
++cx q[20], q[22];
++h q[20];
++p(1.5707963267948966) q[20];
++cx q[20], q[11];
++cx q[20], q[1];
++h q[21];
++p(0.7853981633974483) q[21];
++cx q[11], q[21];
++cx q[1], q[21];
++cx q[11], q[22];
++cx q[21], q[22];
++cx q[1], q[23];
++cx q[21], q[23];
++p(-0.7853981633974483) q[22];
++p(-0.7853981633974483) q[23];
++p(0.7853981633974483) q[21];
++cx q[11], q[22];
++cx q[21], q[22];
++cx q[1], q[23];
++cx q[21], q[23];
++h q[21];
++p(1.5707963267948966) q[21];
++cx q[20], q[21];
++cx q[21], q[12];
++cx q[21], q[2];
++h q[22];
++p(0.7853981633974483) q[22];
++cx q[12], q[22];
++cx q[2], q[22];
++cx q[12], q[23];
++cx q[22], q[23];
++cx q[2], q[24];
++cx q[22], q[24];
++p(-0.7853981633974483) q[23];
++p(-0.7853981633974483) q[24];
++p(0.7853981633974483) q[22];
++cx q[12], q[23];
++cx q[22], q[23];
++cx q[2], q[24];
++cx q[22], q[24];
++h q[22];
++p(1.5707963267948966) q[22];
++cx q[21], q[22];
++cx q[22], q[13];
++cx q[22], q[3];
++h q[23];
++p(0.7853981633974483) q[23];
++cx q[13], q[23];
++cx q[3], q[23];
++cx q[13], q[24];
++cx q[23], q[24];
++cx q[3], q[25];
++cx q[23], q[25];
++p(-0.7853981633974483) q[24];
++p(-0.7853981633974483) q[25];
++p(0.7853981633974483) q[23];
++cx q[13], q[24];
++cx q[23], q[24];
++cx q[3], q[25];
++cx q[23], q[25];
++h q[23];
++p(1.5707963267948966) q[23];
++cx q[22], q[23];
++cx q[23], q[14];
++cx q[23], q[4];
++h q[24];
++p(0.7853981633974483) q[24];
++cx q[14], q[24];
++cx q[4], q[24];
++cx q[14], q[25];
++cx q[24], q[25];
++cx q[4], q[26];
++cx q[24], q[26];
++p(-0.7853981633974483) q[25];
++p(-0.7853981633974483) q[26];
++p(0.7853981633974483) q[24];
++cx q[14], q[25];
++cx q[24], q[25];
++cx q[4], q[26];
++cx q[24], q[26];
++h q[24];
++p(1.5707963267948966) q[24];
++cx q[23], q[24];
++cx q[24], q[15];
++cx q[24], q[5];
++h q[25];
++p(0.7853981633974483) q[25];
++cx q[15], q[25];
++cx q[5], q[25];
++cx q[15], q[26];
++cx q[25], q[26];
++cx q[5], q[27];
++cx q[25], q[27];
++p(-0.7853981633974483) q[26];
++p(-0.7853981633974483) q[27];
++p(0.7853981633974483) q[25];
++cx q[15], q[26];
++cx q[25], q[26];
++cx q[5], q[27];
++cx q[25], q[27];
++h q[25];
++p(1.5707963267948966) q[25];
++cx q[24], q[25];
++cx q[25], q[16];
++cx q[25], q[6];
++h q[26];
++p(0.7853981633974483) q[26];
++cx q[16], q[26];
++cx q[6], q[26];
++cx q[16], q[27];
++cx q[26], q[27];
++cx q[6], q[28];
++cx q[26], q[28];
++p(-0.7853981633974483) q[27];
++p(-0.7853981633974483) q[28];
++p(0.7853981633974483) q[26];
++cx q[16], q[27];
++cx q[26], q[27];
++cx q[6], q[28];
++cx q[26], q[28];
++h q[26];
++p(1.5707963267948966) q[26];
++cx q[25], q[26];
++cx q[26], q[17];
++cx q[26], q[7];
++h q[27];
++p(0.7853981633974483) q[27];
++cx q[17], q[27];
++cx q[7], q[27];
++cx q[17], q[28];
++cx q[27], q[28];
++cx q[7], q[29];
++cx q[27], q[29];
++p(-0.7853981633974483) q[28];
++p(-0.7853981633974483) q[29];
++p(0.7853981633974483) q[27];
++cx q[17], q[28];
++cx q[27], q[28];
++cx q[7], q[29];
++cx q[27], q[29];
++h q[27];
++p(1.5707963267948966) q[27];
++cx q[26], q[27];
++cx q[27], q[18];
++cx q[27], q[8];
++h q[28];
++p(0.7853981633974483) q[28];
++cx q[18], q[28];
++cx q[8], q[28];
++cx q[18], q[29];
++cx q[28], q[29];
++cx q[8], q[30];
++cx q[28], q[30];
++p(-0.7853981633974483) q[29];
++p(-0.7853981633974483) q[30];
++p(0.7853981633974483) q[28];
++cx q[18], q[29];
++cx q[28], q[29];
++cx q[8], q[30];
++cx q[28], q[30];
++h q[28];
++p(1.5707963267948966) q[28];
++cx q[27], q[28];
++cx q[28], q[9];
++cx q[19], q[9];
++cx q[27], q[28];
++h q[28];
++m0 = measure q[28];
++reset q[28];
++if ((m0==true)) {
++    cp(3.141592653589793) q[18], q[8];
++}
++cx q[27], q[18];
++cx q[18], q[8];
++cx q[26], q[27];
++h q[27];
++m1 = measure q[27];
++reset q[27];
++if ((m1==true)) {
++    cp(3.141592653589793) q[17], q[7];
++}
++cx q[26], q[17];
++cx q[17], q[7];
++cx q[25], q[26];
++h q[26];
++m2 = measure q[26];
++reset q[26];
++if ((m2==true)) {
++    cp(3.141592653589793) q[16], q[6];
++}
++cx q[25], q[16];
++cx q[16], q[6];
++cx q[24], q[25];
++h q[25];
++m3 = measure q[25];
++reset q[25];
++if ((m3==true)) {
++    cp(3.141592653589793) q[15], q[5];
++}
++cx q[24], q[15];
++cx q[15], q[5];
++cx q[23], q[24];
++h q[24];
++m4 = measure q[24];
++reset q[24];
++if ((m4==true)) {
++    cp(3.141592653589793) q[14], q[4];
++}
++cx q[23], q[14];
++cx q[14], q[4];
++cx q[22], q[23];
++h q[23];
++m5 = measure q[23];
++reset q[23];
++if ((m5==true)) {
++    cp(3.141592653589793) q[13], q[3];
++}
++cx q[22], q[13];
++cx q[13], q[3];
++cx q[21], q[22];
++h q[22];
++m6 = measure q[22];
++reset q[22];
++if ((m6==true)) {
++    cp(3.141592653589793) q[12], q[2];
++}
++cx q[21], q[12];
++cx q[12], q[2];
++cx q[20], q[21];
++h q[21];
++m7 = measure q[21];
++reset q[21];
++if ((m7==true)) {
++    cp(3.141592653589793) q[11], q[1];
++}
++cx q[20], q[11];
++cx q[11], q[1];
++h q[20];
++m8 = measure q[20];
++reset q[20];
++if ((m8==true)) {
++    cp(3.141592653589793) q[0], q[10];
++}
++cx q[10], q[0];
+diff --git a/tests/conformance/manifest.json b/tests/conformance/manifest.json
+index d345d52..5b56f71 100644
+--- a/tests/conformance/manifest.json
++++ b/tests/conformance/manifest.json
+@@ -143,6 +143,22 @@
+         }
+       }
+     },
++    {
++      "name": "expected-ripple-adder",
++      "source": "../circuits/adder-31.qasm",
++      "args": ["--json"],
++      "expect": {
++        "format": "json",
++        "subset": {
++          "expected-counts": {
++            "status": "exact",
++            "t-count": {"numerator": 36, "denominator": 1},
++            "2q-count": {"numerator": 291, "denominator": 2},
++            "gate-counts": {"cp": {"numerator": 9, "denominator": 2}}
++          }
++        }
++      }
++    },
+     {
+       "name": "expected-correlated-measurements",
+       "source": "expected-correlations.qasm",
+diff --git a/tests/test_expected_costs.py b/tests/test_expected_costs.py
+index aa3af49..95dc18a 100644
+--- a/tests/test_expected_costs.py
++++ b/tests/test_expected_costs.py
+@@ -344,6 +344,9 @@ class ExpectedCostBudgetTests(unittest.TestCase):
+             circuit.reset(0)
+             with circuit.if_test((circuit.clbits[0], True)):
+                 circuit.t(0)
++            # A second read prevents eliminating this outcome immediately.
++            with circuit.if_test((circuit.clbits[0], True)):
++                circuit.s(0)
+         result = circuit_costs(circuit)
+         self.assertIsNone(expected(result, 't-count'))
+         self.assertEqual(expected(result, 'measurements'), 8)
+@@ -362,7 +365,7 @@ class ExpectedCostBudgetTests(unittest.TestCase):
+             gate(path, 'h', (0,), Budget(Limits(history=0)), 0)
+         self.assertEqual(path.history, ())
+ 
+-    def test_history_and_loop_limits_keep_existing_bounds(self):
++    def test_long_history_is_allowed_but_huge_loops_still_stop(self):
+         circuit = QuantumCircuit(1, 1)
+         for _ in range(513):
+             circuit.h(0)
+@@ -370,8 +373,8 @@ class ExpectedCostBudgetTests(unittest.TestCase):
+         with circuit.if_test((circuit.clbits[0], True)):
+             circuit.t(0)
+         result = circuit_costs(circuit)
+-        self.assertIn('history limit', result['expected-counts']['reason'])
+-        self.assertIsNone(expected(result, 't-count'))
++        self.assertEqual(result['expected-counts']['status'], 'exact')
++        self.assertEqual(expected(result, 't-count'), Fraction(1, 2))
+         circuit = QuantumCircuit(1, 1)
+         with circuit.for_loop(range(10**12)):
+             with circuit.if_test((circuit.clbits[0], True)):
+diff --git a/tests/test_expected_scaling.py b/tests/test_expected_scaling.py
+new file mode 100644
+index 0000000..51a24d2
+--- /dev/null
++++ b/tests/test_expected_scaling.py
+@@ -0,0 +1,296 @@
++from fractions import Fraction
++import json
++import math
++from pathlib import Path as FilePath
++import subprocess
++import sys
++import unittest
++from unittest.mock import patch
++
++import numpy as np
++import openqasm3
++from qiskit import QuantumCircuit, qasm3
++from qiskit.circuit.classical import expr
++from qiskit.circuit.library import get_standard_gate_name_mapping
++from qiskit.quantum_info import DensityMatrix, Operator, Pauli
++
++from qasmviz import _dynamic_t_cost
++from qasmviz_expected import Budget, Event, Limits, NotEasy, ONE, Path, _pull_event, canonical_phase
++from qasmviz_expected_circuit import Executor as CircuitExecutor
++from qasmviz_expected_qasm import Executor as SourceExecutor
++from qasmviz_qasm3 import compile_clifford_t_source_with_ast
++
++
++ROOT = FilePath(__file__).resolve().parents[1]
++
++
++def adder(n):
++    """The reported ripple adder, with n input bits per register."""
++    circuit = QuantumCircuit(3 * n + 1, n - 1)
++    circuit.h(range(2 * n + 1))
++    for j in range(n - 1):
++        a, b, t = j, n + j, 2 * n + j
++        if j:
++            circuit.h(t)
++        circuit.p(math.pi / 4, t)
++        circuit.cx(b, t)
++        circuit.cx(a, t)
++        pairs = ((b, t + 1), (t, t + 1), (a, t + 2), (t, t + 2))
++        for control, target in pairs:
++            circuit.cx(control, target)
++        circuit.p(-math.pi / 4, t + 1)
++        circuit.p(-math.pi / 4, t + 2)
++        circuit.p(math.pi / 4, t)
++        for control, target in pairs:
++            circuit.cx(control, target)
++        circuit.h(t)
++        circuit.p(math.pi / 2, t)
++        if j:
++            circuit.cx(t - 1, t)
++        if j < n - 2:
++            circuit.cx(t, b + 1)
++            circuit.cx(t, a + 1)
++        else:
++            circuit.cx(t, n - 1)
++            circuit.cx(2 * n - 1, n - 1)
++    for j in reversed(range(n - 1)):
++        a, b, t = j, n + j, 2 * n + j
++        if j:
++            circuit.cx(t - 1, t)
++        circuit.h(t)
++        circuit.measure(t, n - 2 - j)
++        circuit.reset(t)
++        with circuit.if_test((circuit.clbits[n - 2 - j], True)):
++            circuit.cp(math.pi, b, a)
++        if j:
++            circuit.cx(t - 1, b)
++        circuit.cx(b, a)
++    return circuit
++
++
++class ExpectedScalingTests(unittest.TestCase):
++    def test_reported_adder_through_all_cli_paths(self):
++        source = (ROOT / 'tests/circuits/adder-31.qasm').read_text()
++        for flags in ([], ['--clifford-t'], ['--clifford-t-ext']):
++            with self.subTest(flags=flags):
++                result = subprocess.run([sys.executable, str(ROOT / 'qasmviz.py'), '--json', *flags],
++                                        input=source, text=True, capture_output=True, timeout=30)
++                self.assertEqual(result.returncode, 0, result.stderr)
++                expected = json.loads(result.stdout)['expected-counts']
++                self.assertEqual(expected['status'], 'exact')
++                self.assertEqual(expected['t-count'], {'numerator': 36, 'denominator': 1})
++                self.assertEqual(expected['measurements'], {'numerator': 9, 'denominator': 1})
++                self.assertEqual(expected['resets'], {'numerator': 9, 'denominator': 1})
++                if not flags:
++                    self.assertEqual(expected['gate-counts']['cp'], {'numerator': 9, 'denominator': 2})
++                    self.assertEqual(expected['2q-count'], {'numerator': 291, 'denominator': 2})
++                self.assertNotIn('depth', expected)
++
++    def test_adder_work_scales_linearly_without_branching_or_global_queries(self):
++        previous = None
++        for n in (10, 20, 40, 80):
++            budget = Budget()
++            # Every measurement must be proved by local forward facts. This
++            # would reject an implementation that repeatedly scans the prefix.
++            with patch('qasmviz_expected_stream.probability_one', side_effect=AssertionError('global query')):
++                paths = CircuitExecutor(adder(n), _dynamic_t_cost, budget).run()
++            self.assertEqual(len(paths), 1)
++            self.assertEqual(budget.paths, 1)
++            self.assertEqual(paths[0].counts['t-count'], 4 * (n - 1))
++            self.assertEqual(paths[0].counts['gate:cp'], Fraction(n - 1, 2))
++            self.assertLess(budget.steps, 650 * n)
++            self.assertEqual(budget.step_limit, 256 + 64 * budget.input_size)
++            if previous is not None:
++                self.assertLess(budget.steps, 2.2 * previous)
++            previous = budget.steps
++
++    def test_compiler_scheduling_preserves_local_proofs(self):
++        source = (ROOT / 'tests/circuits/adder-31.qasm').read_text()
++        _, program = compile_clifford_t_source_with_ast(source, optimization_level=0)
++        budget = Budget()
++        with patch('qasmviz_expected_stream.probability_one', side_effect=AssertionError('global query')):
++            paths = SourceExecutor(program, budget).run()
++        self.assertEqual(paths[0].counts['t-count'], 36)
++        self.assertEqual(budget.paths, 1)
++        self.assertLess(budget.steps, 15000)
++
++    def test_many_independent_results_reuse_one_bit(self):
++        circuit = QuantumCircuit(1, 1)
++        for _ in range(200):
++            circuit.h(0)
++            circuit.measure(0, 0)
++            circuit.reset(0)
++            with circuit.if_test((circuit.clbits[0], True)):
++                circuit.t(0)
++        for source in (False, True):
++            budget = Budget()
++            if source:
++                _, program = compile_clifford_t_source_with_ast(qasm3.dumps(circuit), optimization_level=0)
++                paths = SourceExecutor(program, budget).run()
++            else:
++                paths = CircuitExecutor(circuit, _dynamic_t_cost, budget).run()
++            self.assertEqual(paths[0].counts['gate:t'], 100)
++            self.assertEqual(budget.paths, 1)
++
++    def test_declared_register_sizes_contribute_to_the_budget(self):
++        program = openqasm3.parse('qubit[2048] q; bit[2048] m; h q[0]; m[0]=measure q[0]; if(m[0]) { t q[0]; }')
++        budget = Budget()
++        paths = SourceExecutor(program, budget).run()
++        self.assertEqual(paths[0].counts['gate:t'], Fraction(1, 2))
++        self.assertGreaterEqual(budget.input_size, 4096)
++
++    def test_feedback_changes_later_marginals(self):
++        # Bell-correlated results cannot be treated as independent coins.
++        # The first correction makes the second measurement certainly zero.
++        circuit = QuantumCircuit(2, 1)
++        circuit.h(0)
++        circuit.cx(0, 1)
++        circuit.measure(0, 0)
++        circuit.reset(0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.x(1)
++        circuit.measure(1, 0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.t(0)
++        for source in (False, True):
++            budget = Budget()
++            if source:
++                _, program = compile_clifford_t_source_with_ast(qasm3.dumps(circuit), optimization_level=0)
++                paths = SourceExecutor(program, budget).run()
++            else:
++                paths = CircuitExecutor(circuit, _dynamic_t_cost, budget).run()
++            self.assertEqual(paths[0].counts.get('gate:t', 0), 0)
++            self.assertEqual(budget.paths, 1)
++
++    def test_unused_measurement_still_dephases_state(self):
++        circuit = QuantumCircuit(1, 1)
++        circuit.h(0)
++        circuit.measure(0, 0)  # overwritten without a read
++        circuit.h(0)
++        circuit.measure(0, 0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.t(0)
++        paths = CircuitExecutor(circuit, _dynamic_t_cost, Budget()).run()
++        self.assertEqual(paths[0].counts['gate:t'], Fraction(1, 2))
++
++    def test_negated_guard_and_else_costs(self):
++        source = '''include "stdgates.inc";
++qubit[3] q; bit b;
++h q[0]; h q[1]; ccx q[0],q[1],q[2];
++b=measure q[2]; reset q[2];
++if(!(b==true)) { t q[0]; } else { t q[0]; t q[1]; t q[2]; }
++'''
++        # The AND is true with probability 1/4: 3/4 * 1 + 1/4 * 3.
++        circuit = QuantumCircuit(3, 1)
++        circuit.h([0, 1])
++        circuit.ccx(0, 1, 2)
++        circuit.measure(2, 0)
++        circuit.reset(2)
++        with circuit.if_test(expr.logic_not(expr.equal(circuit.clbits[0], True))) as otherwise:
++            circuit.t(0)
++        with otherwise:
++            circuit.t([0, 1, 2])
++        paths = CircuitExecutor(circuit, _dynamic_t_cost, Budget()).run()
++        self.assertEqual(paths[0].counts['gate:t'], Fraction(3, 2))
++        _, program = compile_clifford_t_source_with_ast(source, optimization_level=0)
++        paths = SourceExecutor(program, Budget()).run()
++        self.assertEqual(paths[0].counts['t-count'], 7 + Fraction(3, 2))
++
++    def test_feedback_channel_matches_kraus_matrices(self):
++        def matrix(x, z):
++            return Pauli(([(z >> i) & 1 for i in range(2)],
++                          [(x >> i) & 1 for i in range(2)])).to_matrix()
++        branches = ((Event('gate', (1,), ('h',)), Event('gate', (1,), ('t',))),
++                    (Event('gate', (0, 1), ('cx',)), Event('gate', (0,), ('s',))))
++        unitaries = []
++        mapping = get_standard_gate_name_mapping()
++        for branch in branches:
++            circuit = QuantumCircuit(2)
++            for event in branch:
++                circuit.append(mapping[event.value[0]], event.wires)
++            unitaries.append(Operator(circuit).data)
++        for reset in (False, True):
++            common = (Event('reset', (0,)),) if reset else ()
++            event = Event('instrument', (0, 1), (common, branches))
++            kraus = []
++            for outcome, unitary in enumerate(unitaries):
++                local = np.zeros((2, 2))
++                local[0 if reset else outcome, outcome] = 1
++                kraus.append(unitary @ np.kron(np.eye(2), local))
++            for x in range(4):
++                for z in range(4):
++                    terms = _pull_event({(x, z): ONE}, event, Budget())
++                    actual = sum((float(a) + math.sqrt(2) * float(b)) * matrix(s, t)
++                                 for (s, t), (a, b) in terms.items())
++                    reference = sum(k.conj().T @ matrix(x, z) @ k for k in kraus)
++                    np.testing.assert_allclose(actual, reference, atol=2e-14, rtol=0)
++
++    def test_only_exact_canonical_float_literals_are_recognized(self):
++        for k in range(-8, 9):
++            angle = k * math.pi / 4
++            self.assertIsNotNone(canonical_phase('p', (0,), angle))
++            self.assertIsNone(canonical_phase('p', (0,), math.nextafter(angle, math.inf)))
++        circuit = QuantumCircuit(1, 1)
++        circuit.h(0)
++        circuit.p(math.nextafter(math.pi / 2, math.inf), 0)
++        circuit.h(0)
++        circuit.measure(0, 0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.t(0)
++        with self.assertRaisesRegex(NotEasy, 'unsupported gate'):
++            CircuitExecutor(circuit, _dynamic_t_cost, Budget()).run()
++
++    def test_forward_facts_agree_with_density_matrices(self):
++        rng, mapping = np.random.default_rng(9417), get_standard_gate_name_mapping()
++        path, budget, state = Path(), Budget(Limits(steps=100000)), DensityMatrix.from_label('0000')
++        for _ in range(400):
++            name = str(rng.choice(('h', 'x', 's', 't', 'tdg', 'cx', 'ccx', 'reset')))
++            arity = 3 if name == 'ccx' else 2 if name == 'cx' else 1
++            wires = tuple(int(q) for q in rng.choice(4, arity, replace=False))
++            event = Event('reset', wires) if name == 'reset' else Event('gate', wires, (name,))
++            path.record(event, budget)
++            state = state.reset(wires) if name == 'reset' else state.evolve(mapping[name], qargs=wires)
++            for q in range(4):
++                probability = path.facts.probability(q)
++                if probability is not None:
++                    self.assertAlmostEqual(float(probability), state.probabilities([q])[1], places=12)
++
++    def test_changing_a_function_witness_invalidates_the_relation(self):
++        circuit = QuantumCircuit(2, 1)
++        circuit.h(0)
++        circuit.cx(0, 1)
++        circuit.cx(1, 0)  # q[1] is now |+>, no longer a function of q[0].
++        circuit.h(1)
++        circuit.measure(1, 0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.t(0)
++        paths = CircuitExecutor(circuit, _dynamic_t_cost, Budget()).run()
++        self.assertEqual(paths[0].counts.get('gate:t', 0), 0)
++
++    def test_explicit_work_cap_and_expression_cap_still_stop_early(self):
++        budget = Budget(Limits(steps=100))
++        with self.assertRaisesRegex(NotEasy, 'work limit'):
++            CircuitExecutor(adder(10), _dynamic_t_cost, budget).run()
++        self.assertLessEqual(budget.steps, 100)
++        # A genuinely hard observable must not trigger an unbounded expansion.
++        circuit = QuantumCircuit(8, 1)
++        for q in range(8):
++            circuit.h(q)
++        for q in range(1, 8):
++            circuit.cx(q, 0)
++        for q in range(8):
++            circuit.t(q)
++            circuit.h(q)
++        for q in range(1, 8):
++            circuit.cx(q, 0)
++        circuit.measure(0, 0)
++        with circuit.if_test((circuit.clbits[0], True)):
++            circuit.t(0)
++        budget = Budget()
++        with self.assertRaisesRegex(NotEasy, 'expression limit'):
++            CircuitExecutor(circuit, _dynamic_t_cost, budget).run()
++        self.assertLess(budget.steps, 2000)
++
++
++if __name__ == '__main__':
++    unittest.main()

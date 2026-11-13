@@ -5,9 +5,10 @@ Paulis with coefficients in Q(sqrt(2)). All work limits are shared by one
 analysis, including classical execution and every probability query.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from functools import lru_cache
+import math
 
 
 class NotEasy(ValueError):
@@ -20,9 +21,10 @@ class SymbolicPhase(NotEasy):
 
 @dataclass(frozen=True)
 class Limits:
-    steps: int = 10000
+    steps: int | None = None
+    steps_per_input: int = 64
     paths: int = 64
-    history: int = 512
+    history: int | None = None
     terms: int = 32
     qubits: int = 4096
     iterations: int = 64
@@ -36,9 +38,22 @@ class Budget:
     limits: Limits = field(default_factory=Limits)
     steps: int = 0
     paths: int = 1
+    input_size: int = 0
+
+    @property
+    def step_limit(self):
+        return (self.limits.steps if self.limits.steps is not None else
+                256 + self.limits.steps_per_input * self.input_size)
+
+    @property
+    def remaining(self):
+        return self.step_limit - self.steps
+
+    def input(self, count=1):
+        self.input_size += count
 
     def spend(self, count=1):
-        if self.steps + count > self.limits.steps:
+        if self.steps + count > self.step_limit:
             raise NotEasy('analysis work limit reached')
         self.steps += count
 
@@ -58,6 +73,24 @@ class Event:
     kind: str
     wires: tuple
     value: object = None
+    known: tuple | None = None
+
+
+@dataclass(frozen=True)
+class History:
+    event: Event
+    previous: object
+    length: int
+
+    def __len__(self):
+        return self.length
+
+    def __reversed__(self):
+        node = self
+        while isinstance(node, History):
+            yield node.event
+            node = node.previous
+        yield from reversed(node)
 
 
 @dataclass
@@ -66,12 +99,15 @@ class Path:
     values: dict = field(default_factory=dict)
     scopes: list = field(default_factory=list)
     counts: dict = field(default_factory=dict)
-    history: tuple = ()
+    history: object = ()
     exit: str = 'normal'
+    facts: object = None
+    track: bool = True
 
     def copy(self):
         return Path(self.probability, dict(self.values), [dict(s) for s in self.scopes],
-                    dict(self.counts), self.history, self.exit)
+                    dict(self.counts), self.history, self.exit,
+                    self.facts.copy() if self.facts is not None else None, self.track)
 
     def count(self, name, value=1):
         old = self.counts.get(name, 0)
@@ -79,9 +115,15 @@ class Path:
 
     def record(self, event, budget):
         budget.spend()
-        if len(self.history) >= budget.limits.history:
+        if budget.limits.history is not None and len(self.history) >= budget.limits.history:
             raise NotEasy('quantum history limit reached')
-        self.history += (event,)
+        if self.track:
+            if self.facts is None:
+                from qasmviz_expected_basis import BasisFacts
+                self.facts = BasisFacts()
+            self.facts.apply(event, self.history, budget)
+            event = replace(event, known=(self.facts.unknown, self.facts.ones))
+        self.history = History(event, self.history, len(self.history) + 1)
 
 
 ONE = (Fraction(1), Fraction(0))
@@ -106,6 +148,19 @@ def _scale(value, factor):
     return value[0] * factor, value[1] * factor
 
 
+def reduce_known(terms, known, budget):
+    if known is None:
+        return terms
+    unknown, ones = known
+    output = {}
+    for (x, z), coefficient in terms.items():
+        budget.spend()
+        if not x & ~unknown:
+            sign = -1 if (z & ones).bit_count() % 2 else 1
+            _add_term(output, (x, z & unknown), _scale(coefficient, sign), budget)
+    return output
+
+
 @lru_cache(maxsize=32)
 def _clifford_action(name, arity):
     # The existing named-gate tables contain signed, exact tableau actions.
@@ -128,6 +183,20 @@ _CCX = (
 )
 _DIAGONAL = frozenset(('diagonal', 'rz', 'p', 'u1', 'cp', 'cu1', 'crz', 'cs', 'csdg', 'ccz'))
 _AXES = {'rx': 'x', 'ry': 'y', 'rxx': 'xx', 'ryy': 'yy', 'rzz': 'zz', 'rzx': 'zx'}
+_QUARTERS = {k * math.pi / 4: k % 8 for k in range(-8, 9)}
+_PHASE_WORDS = ((), ('t',), ('s',), ('s', 't'), ('z',), ('z', 't'), ('sdg',), ('tdg',))
+
+
+def canonical_phase(name, wires, angle):
+    """Interpret exactly matching canonical pi literals; never use a tolerance."""
+    if not isinstance(angle, (int, float)) or angle not in _QUARTERS:
+        return None
+    quarter = _QUARTERS[angle]
+    if name in ('p', 'u1', 'rz'):
+        return tuple(Event('gate', tuple(wires), (word,)) for word in _PHASE_WORDS[quarter]), quarter % 2
+    if name in ('cp', 'cu1') and quarter in (0, 4):
+        return (() if quarter == 0 else (Event('gate', tuple(wires), ('cz',)),)), 0
+    return None
 
 
 def _pull_gate(terms, name, wires, budget):
@@ -187,32 +256,52 @@ def _pull_gate(terms, name, wires, budget):
     return output
 
 
+def _pull_event(terms, event, budget):
+    if event.kind == 'gate':
+        return _pull_gate(terms, event.value[0], event.wires, budget)
+    if event.kind == 'instrument':
+        common, branches = event.value
+        output = {}
+        for outcome, branch in enumerate(branches):
+            pulled = terms
+            for item in reversed(branch):
+                pulled = _pull_event(pulled, item, budget)
+            for item in reversed(common):
+                pulled = _pull_event(pulled, item, budget)
+            # Unnormalized projectors sum to the complete, trace-preserving
+            # measurement/feedback channel. Do not divide by outcome odds.
+            pulled = _pull_event(pulled, Event('measure', event.wires, (outcome, Fraction(1))), budget)
+            for word, value in pulled.items():
+                _add_term(output, word, value, budget)
+        return output
+    output = {}
+    bit = 1 << event.wires[0]
+    for (x, z), coefficient in terms.items():
+        budget.spend()
+        if x & bit:
+            continue
+        if event.kind == 'reset':
+            _add_term(output, (x, z & ~bit), coefficient, budget)
+        elif event.kind == 'discard':
+            _add_term(output, (x, z), coefficient, budget)
+        else:
+            outcome, probability = event.value
+            value = _scale(coefficient, 1 / (2 * probability))
+            _add_term(output, (x, z), value, budget)
+            _add_term(output, (x, z ^ bit), _scale(value, -1 if outcome else 1), budget)
+    return output
+
+
 def _rational_probability(history, wire, budget):
     terms = {(0, 1 << wire): ONE}
     constant = ZERO
     for event in reversed(history):
+        terms = reduce_known(terms, event.known, budget)
         identity = terms.pop((0, 0), ZERO)
         constant = constant[0] + identity[0], constant[1] + identity[1]
         if not terms:
             break
-        if event.kind == 'gate':
-            name, = event.value
-            terms = _pull_gate(terms, name, event.wires, budget)
-            continue
-        output = {}
-        bit = 1 << event.wires[0]
-        for (x, z), coefficient in terms.items():
-            budget.spend()
-            if x & bit:
-                continue  # Projection/reset removes X and Y components.
-            if event.kind == 'reset':
-                _add_term(output, (x, z & ~bit), coefficient, budget)
-            else:
-                outcome, probability = event.value
-                value = _scale(coefficient, 1 / (2 * probability))
-                _add_term(output, (x, z), value, budget)
-                _add_term(output, (x, z ^ bit), _scale(value, -1 if outcome else 1), budget)
-        terms = output
+        terms = _pull_event(terms, event, budget)
     # Every declared qubit starts in |0>. X/Y terms have zero expectation.
     expectation = constant
     for (x, _), value in terms.items():
@@ -235,6 +324,7 @@ def _zero_expectation(history, wire, budget):
     is assumed. This covers function ancillas even with arbitrary phase gates.
     """
     words = {(0, 1 << wire)}
+    history = list(reversed(tuple(reversed(history))))
     touched, prefix_masks = 0, []
     for event in history:
         budget.spend(len(event.wires))
@@ -245,6 +335,11 @@ def _zero_expectation(history, wire, budget):
         output = set()
         for x, z in words:
             budget.spend()
+            if event.known is not None:
+                unknown, _ = event.known
+                if x & ~unknown:
+                    continue
+                z &= unknown
             # An untouched input wire is still an independent |0>. Its X/Y
             # factor proves zero regardless of operations on the other wires.
             if x & ~prefix_masks[index]:
@@ -266,9 +361,14 @@ def _zero_expectation(history, wire, budget):
                         images.append((x ^ ax, z ^ az))
                 else:
                     images = _pull_gate({(x, z): ONE}, name, event.wires, budget)
+            elif event.kind == 'instrument':
+                # The exact channel may itself prove zero. Symbolic phases
+                # within a feedback channel conservatively stop this proof.
+                images = _pull_event({(x, z): ONE}, event, budget)
             else:
                 bit = 1 << event.wires[0]
                 images = [] if x & bit else ([(x, z & ~bit)] if event.kind == 'reset'
+                                             else [(x, z)] if event.kind == 'discard'
                                              else [(x, z), (x, z ^ bit)])
             for word in images:
                 budget.spend()
@@ -285,6 +385,8 @@ def _zero_expectation(history, wire, budget):
 
 def probability_one(history, wire, budget):
     """Return an exact rational Born probability, or stop this analysis."""
+    if not budget.input_size:
+        budget.input(len(history))
     try:
         return _rational_probability(history, wire, budget)
     except SymbolicPhase:
@@ -294,7 +396,9 @@ def probability_one(history, wire, budget):
 
 
 def measure(path, wire, budget):
-    probability = probability_one(path.history, wire, budget)
+    probability = path.facts.probability(wire) if path.facts is not None else None
+    if probability is None:
+        probability = probability_one(path.history, wire, budget)
     outcomes = [(bit, probability if bit else 1 - probability) for bit in (0, 1)]
     outcomes = [(bit, p) for bit, p in outcomes if p]
     if len(outcomes) == 2:
@@ -305,6 +409,8 @@ def measure(path, wire, budget):
             branch = path
         else:
             budget.spend(len(path.values) + len(path.counts) + sum(map(len, path.scopes)))
+            if path.facts is not None:
+                budget.spend(path.facts.copy_size())
             branch = path.copy()
         branch.probability *= p
         branch.count('measurements')

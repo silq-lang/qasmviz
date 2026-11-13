@@ -11,6 +11,7 @@ from openqasm3 import ast
 
 from qasmviz_constants import ConstantEvaluationError, ConstantEvaluator, Scalar
 from qasmviz_expected import Event, NotEasy, Path, gate, measure
+from qasmviz_expected_stream import Choice, Quantum, Sample, UnsupportedStream, execute, plan
 from qasmviz_loops import iterations
 
 
@@ -123,8 +124,13 @@ class Executor:
         pending = [(self.program, 0)]
         while pending:
             node, depth = pending.pop()
+            self.budget.input()
             self.budget.spend()
             self.budget.depth(depth)
+            if isinstance(node, ast.QubitDeclaration) and isinstance(node.size, ast.IntegerLiteral):
+                self.budget.input(min(max(0, node.size.value), self.budget.limits.qubits))
+            if isinstance(node, ast.BitType) and isinstance(node.size, ast.IntegerLiteral):
+                self.budget.input(min(max(0, node.size.value), self.budget.limits.integer_bits))
             if isinstance(node, (ast.WhileLoop, ast.ExternDeclaration, ast.SubroutineDefinition,
                                  ast.FunctionCall, ast.IODeclaration)):
                 raise NotEasy(f'unsupported expectation construct: {type(node).__name__}')
@@ -139,16 +145,81 @@ class Executor:
             if isinstance(node, ast.QASMNode):
                 pending.extend((getattr(node, f.name), depth + 1) for f in fields(node) if f.name != 'span')
             elif isinstance(node, (list, tuple)):
-                if len(node) > self.budget.limits.steps - self.budget.steps:
+                self.budget.input(len(node))
+                if len(node) > self.budget.remaining:
                     raise NotEasy('analysis work limit reached')
                 pending.extend((item, depth) for item in node)
 
     def run(self):
         try:
             self.preflight()
+            try:
+                stream = plan(self.stream(), self.budget)
+            except UnsupportedStream:
+                self.qubits, self.definitions = 0, {}
+            else:
+                return execute(stream, self.budget)
             return self.block(self.program.statements, [Path()])
         except ConstantEvaluationError as exc:
             raise NotEasy(f'unsupported classical evaluation: {exc}') from exc
+
+    def bit_key(self, node, path):
+        name, indices = selected(node, path, self.budget)
+        if not isinstance(path.values[name].type, ast.BitType) or len(indices) != 1:
+            raise UnsupportedStream()
+        return name, indices[0]
+
+    def condition_bit(self, node, path):
+        self.budget.spend()
+        if isinstance(node, (ast.Identifier, ast.IndexExpression)):
+            return self.bit_key(node, path), True
+        if isinstance(node, ast.UnaryExpression) and node.op.name == '!':
+            key, polarity = self.condition_bit(node.expression, path)
+            return key, not polarity
+        if isinstance(node, ast.BinaryExpression) and node.op.name in ('==', '!='):
+            left, right = node.lhs, node.rhs
+            if isinstance(left, (ast.BooleanLiteral, ast.IntegerLiteral)):
+                left, right = right, left
+            if isinstance(right, (ast.BooleanLiteral, ast.IntegerLiteral)) and right.value in (0, 1):
+                key, polarity = self.condition_bit(left, path)
+                return key, (polarity == bool(right.value)) == (node.op.name == '==')
+        raise UnsupportedStream()
+
+    def quantum(self, statements, path):
+        for statement in statements:
+            self.budget.spend()
+            if not isinstance(statement, (ast.QuantumGate, ast.QuantumPhase, ast.QuantumReset,
+                                          ast.QuantumBarrier, ast.Include)):
+                raise UnsupportedStream()
+            self.statement(statement, path, 0)
+        return Quantum.capture(path)
+
+    def stream(self):
+        path, items = Path(track=False), []
+        for statement in self.program.statements:
+            self.budget.spend()
+            if isinstance(statement, (ast.QubitDeclaration, ast.QuantumGateDefinition, ast.AliasStatement)):
+                self.statement(statement, path, 0)
+            elif isinstance(statement, ast.ClassicalDeclaration):
+                if not isinstance(statement.type, ast.BitType) or statement.init_expression is not None:
+                    raise UnsupportedStream()
+                self.statement(statement, path, 0)
+            elif isinstance(statement, ast.QuantumMeasurementStatement):
+                wires = self.wires(statement.measure.qubit, path)
+                if len(wires) != 1:
+                    raise UnsupportedStream()
+                key = self.bit_key(statement.target, path) if statement.target is not None else None
+                items.append(Sample(wires[0], key))
+            elif isinstance(statement, ast.BranchingStatement):
+                key, polarity = self.condition_bit(statement.condition, path)
+                yes = self.quantum(statement.if_block, path)
+                no = self.quantum(statement.else_block, path)
+                items.append(Choice(key, (no, yes) if polarity else (yes, no)))
+            else:
+                item = self.quantum((statement,), path)
+                if item.events or item.counts:
+                    items.append(item)
+        return items
 
     def bind(self, path, name, cell):
         if path.scopes and name not in path.scopes[-1]:

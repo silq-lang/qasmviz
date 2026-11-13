@@ -344,6 +344,9 @@ class ExpectedCostBudgetTests(unittest.TestCase):
             circuit.reset(0)
             with circuit.if_test((circuit.clbits[0], True)):
                 circuit.t(0)
+            # A second read prevents eliminating this outcome immediately.
+            with circuit.if_test((circuit.clbits[0], True)):
+                circuit.s(0)
         result = circuit_costs(circuit)
         self.assertIsNone(expected(result, 't-count'))
         self.assertEqual(expected(result, 'measurements'), 8)
@@ -362,7 +365,7 @@ class ExpectedCostBudgetTests(unittest.TestCase):
             gate(path, 'h', (0,), Budget(Limits(history=0)), 0)
         self.assertEqual(path.history, ())
 
-    def test_history_and_loop_limits_keep_existing_bounds(self):
+    def test_long_history_is_allowed_but_huge_loops_still_stop(self):
         circuit = QuantumCircuit(1, 1)
         for _ in range(513):
             circuit.h(0)
@@ -370,8 +373,8 @@ class ExpectedCostBudgetTests(unittest.TestCase):
         with circuit.if_test((circuit.clbits[0], True)):
             circuit.t(0)
         result = circuit_costs(circuit)
-        self.assertIn('history limit', result['expected-counts']['reason'])
-        self.assertIsNone(expected(result, 't-count'))
+        self.assertEqual(result['expected-counts']['status'], 'exact')
+        self.assertEqual(expected(result, 't-count'), Fraction(1, 2))
         circuit = QuantumCircuit(1, 1)
         with circuit.for_loop(range(10**12)):
             with circuit.if_test((circuit.clbits[0], True)):
