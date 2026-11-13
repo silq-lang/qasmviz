@@ -9,7 +9,8 @@ from qiskit.circuit import (
 from qiskit.circuit.classical import expr, types
 from qiskit.circuit.library import GlobalPhaseGate, get_standard_gate_name_mapping
 
-from qasmviz_expected import Event, NotEasy, Path, gate, measure
+from qasmviz_expected import Event, NotEasy, Path, canonical_phase, gate, measure
+from qasmviz_expected_stream import Choice, Quantum, Sample, UnsupportedStream, execute, plan
 
 
 _STANDARD = get_standard_gate_name_mapping()
@@ -29,7 +30,8 @@ class Executor:
         while pending:
             circuit, depth = pending.pop()
             self.budget.depth(depth)
-            if len(circuit.data) > self.budget.limits.steps - self.budget.steps:
+            self.budget.input(len(circuit.data))
+            if len(circuit.data) > self.budget.remaining:
                 raise NotEasy('analysis work limit reached')
             for instruction in circuit.data:
                 self.budget.spend()
@@ -44,16 +46,83 @@ class Executor:
                     if count > self.budget.limits.iterations:
                         raise NotEasy('loop iteration limit reached')
                 if isinstance(operation, ControlFlowOp):
-                    if len(operation.blocks) > self.budget.limits.steps - self.budget.steps:
+                    if len(operation.blocks) > self.budget.remaining:
                         raise NotEasy('analysis work limit reached')
                     pending.extend((block, depth + 1) for block in operation.blocks)
 
     def run(self):
         self.preflight()
+        self.budget.input(self.circuit.num_qubits + self.circuit.num_clbits)
         self.budget.spend(self.circuit.num_qubits + self.circuit.num_clbits)
         qmap = {q: i for i, q in enumerate(self.circuit.qubits)}
         cmap = {c: i for i, c in enumerate(self.circuit.clbits)}
+        try:
+            stream = plan(self.stream(qmap, cmap), self.budget)
+        except UnsupportedStream:
+            pass
+        else:
+            return execute(stream, self.budget)
         return self.block(self.circuit, [Path()], qmap, cmap)
+
+    def condition_bit(self, condition, cmap, depth=0):
+        """Accept a single bit, its negation, or equality to a Boolean."""
+        self.budget.spend()
+        self.budget.depth(depth)
+        if isinstance(condition, Clbit):
+            return cmap[condition], True
+        if isinstance(condition, ClassicalRegister) and len(condition) == 1:
+            return cmap[condition[0]], True
+        if isinstance(condition, tuple) and condition[1] in (0, 1):
+            key, polarity = self.condition_bit(condition[0], cmap, depth + 1)
+            return key, polarity == bool(condition[1])
+        if isinstance(condition, expr.Var):
+            return self.condition_bit(condition.var, cmap, depth + 1)
+        if isinstance(condition, expr.Unary) and condition.op.name == 'LOGIC_NOT':
+            key, polarity = self.condition_bit(condition.operand, cmap, depth + 1)
+            return key, not polarity
+        if isinstance(condition, expr.Binary) and condition.op.name in ('EQUAL', 'NOT_EQUAL'):
+            left, right = condition.left, condition.right
+            if isinstance(left, expr.Value):
+                left, right = right, left
+            if isinstance(right, expr.Value) and right.value in (0, 1):
+                key, polarity = self.condition_bit(left, cmap, depth + 1)
+                return key, (polarity == bool(right.value)) == (condition.op.name == 'EQUAL')
+        raise UnsupportedStream()
+
+    def quantum(self, instructions, qmap, cmap):
+        path = Path(track=False)
+        for instruction in instructions:
+            self.budget.spend()
+            operation = instruction.operation
+            if isinstance(operation, (ControlFlowOp, Store, Measure)):
+                raise UnsupportedStream()
+            self.instruction(instruction, path, qmap, cmap, 0)
+        return Quantum.capture(path)
+
+    def stream(self, qmap, cmap):
+        items = []
+        for instruction in self.circuit.data:
+            self.budget.spend()
+            operation = instruction.operation
+            if operation.base_class is Measure:
+                if len(instruction.qubits) != 1 or len(instruction.clbits) != 1:
+                    raise UnsupportedStream()
+                items.append(Sample(qmap[instruction.qubits[0]], cmap[instruction.clbits[0]]))
+            elif isinstance(operation, IfElseOp):
+                key, polarity = self.condition_bit(operation.condition, cmap)
+                branches = []
+                for block in operation.blocks:
+                    branches.append(self.quantum(block.data,
+                        {q: qmap[outer] for q, outer in zip(block.qubits, instruction.qubits)},
+                        {c: cmap[outer] for c, outer in zip(block.clbits, instruction.clbits)}))
+                if len(branches) == 1:
+                    branches.append(Quantum((), {}))
+                items.append(Choice(key, tuple(reversed(branches)) if polarity else tuple(branches)))
+            else:
+                item = self.quantum((instruction,), qmap, cmap)
+                if item.events or item.counts:
+                    items.append(item)
+        return items
 
     def read(self, value, path, cmap, depth=0):
         self.budget.spend()
@@ -216,7 +285,9 @@ class Executor:
         name = canonical if standard is not None and operation.base_class is standard.base_class else 'unsupported:' + operation.name
         path.count('gate-count')
         path.count('gate:' + operation.name)
-        path.count('t-count', self.t_cost(operation))
+        normalized = (canonical_phase(name, wires, operation.params[0])
+                      if len(operation.params) == 1 else None)
+        path.count('t-count', normalized[1] if normalized is not None else self.t_cost(operation))
         if len(wires) == 2:
             path.count('2q-count')
         if operation.name == 'cx':
@@ -226,7 +297,11 @@ class Executor:
             open_controls = [wires[i] for i in range(operation.num_ctrl_qubits) if not (operation.ctrl_state >> i) & 1]
         for wire in open_controls:
             gate(path, 'x', (wire,), self.budget, None, count=False)
-        gate(path, name, wires, self.budget, None, count=False)
+        if normalized is None:
+            gate(path, name, wires, self.budget, None, count=False)
+        else:
+            for event in normalized[0]:
+                path.record(event, self.budget)
         for wire in reversed(open_controls):
             gate(path, 'x', (wire,), self.budget, None, count=False)
         return [path]

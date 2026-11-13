@@ -144,6 +144,22 @@
       }
     },
     {
+      "name": "expected-ripple-adder",
+      "source": "../circuits/adder-31.qasm",
+      "args": ["--json"],
+      "expect": {
+        "format": "json",
+        "subset": {
+          "expected-counts": {
+            "status": "exact",
+            "t-count": {"numerator": 36, "denominator": 1},
+            "2q-count": {"numerator": 291, "denominator": 2},
+            "gate-counts": {"cp": {"numerator": 9, "denominator": 2}}
+          }
+        }
+      }
+    },
+    {
       "name": "expected-correlated-measurements",
       "source": "expected-correlations.qasm",
       "args": ["--clifford-t", "--json"],
