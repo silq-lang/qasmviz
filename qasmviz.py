@@ -500,7 +500,14 @@ def _dynamic_t_cost(operation):
     if operation.name in _CLIFFORD_GATES:
         return 0
     from qiskit.circuit import ControlledGate
-    from qiskit.circuit.library import XGate, YGate, ZGate
+    from qiskit.circuit.library import CPhaseGate, CU1Gate, XGate, YGate, ZGate
+    if operation.base_class in (CPhaseGate, CU1Gate):
+        # CP(pi) is CZ, including open controls. Use the same exact-literal
+        # rule as probability normalization; nearby angles remain unknown.
+        from qasmviz_expected import canonical_phase
+        normalized = canonical_phase('cp', (0, 1), operation.params[0])
+        if normalized is not None:
+            return normalized[1]
     if (isinstance(operation, ControlledGate) and operation.num_ctrl_qubits == 1
             and isinstance(operation.base_gate, (XGate, YGate, ZGate))):
         return 0  # Negative controls on Paulis are still Clifford.

@@ -287,7 +287,8 @@ class Executor:
         path.count('gate:' + operation.name)
         normalized = (canonical_phase(name, wires, operation.params[0])
                       if len(operation.params) == 1 else None)
-        path.count('t-count', normalized[1] if normalized is not None else self.t_cost(operation))
+        # Quantum normalization must not override the bounds' cost model.
+        path.count('t-count', self.t_cost(operation))
         if len(wires) == 2:
             path.count('2q-count')
         if operation.name == 'cx':

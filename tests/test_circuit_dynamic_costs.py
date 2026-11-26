@@ -1,6 +1,7 @@
 import inspect
 import itertools
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -10,9 +11,12 @@ import unittest
 from qiskit import QuantumCircuit
 from qiskit.circuit import CASE_DEFAULT, Parameter
 from qiskit.circuit.classical import expr
+from qiskit.circuit.library import CPhaseGate, CU1Gate, CZGate
+from qiskit.quantum_info import Operator
 from qiskit_qasm3_import import parse
 
-from qasmviz import collect_costs
+from qasmviz import _dynamic_t_cost, collect_costs
+from qasmviz_circuit_costs import collect_circuit_dynamic_costs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +118,84 @@ if(b) { t q[0]; } else { t q[1]; t q[1]; t q[1]; reset q[0]; }
         circuit = parse(HEADER + 'qubit[2] q; bit b; if(b) { negctrl @ x q[0],q[1]; }')
         self.assertBound(costs(circuit), 't-count', 0, 0)
         self.assertBound(costs(circuit), '2q-count', 0, 1)
+
+    def test_controlled_clifford_phases_have_zero_t_cost_without_known_probabilities(self):
+        for constructor in (CPhaseGate, CU1Gate):
+            for angle in (-2 * math.pi, -math.pi, 0, math.pi, 2 * math.pi):
+                for state in (0, 1):
+                    with self.subTest(gate=constructor.__name__, angle=angle, control=state):
+                        operation = constructor(angle, ctrl_state=state)
+                        # Independently verify the recognized gate's unitary.
+                        reference = QuantumCircuit(2)
+                        if abs(angle) == math.pi:
+                            if state == 0:
+                                reference.x(0)
+                            reference.append(CZGate(), [0, 1])
+                            if state == 0:
+                                reference.x(0)
+                        self.assertTrue(Operator(operation).equiv(Operator(reference)))
+                        circuit = QuantumCircuit(2, 1)
+                        # b is uninitialized: this result must come from gate
+                        # classification, not from the expected-cost analysis.
+                        with circuit.if_test((circuit.clbits[0], True)):
+                            circuit.append(operation, [0, 1])
+                        result = costs(circuit)
+                        self.assertBound(result, 't-count', 0, 0)
+                        self.assertEqual(result['expected-counts']['t-count'],
+                                         {'numerator': 0, 'denominator': 1})
+                        self.assertIsNone(result['expected-counts']['gate-count'])
+
+    def test_other_controlled_phases_keep_unknown_t_costs(self):
+        for constructor in (CPhaseGate, CU1Gate):
+            for angle in (math.pi / 2, math.nextafter(math.pi, math.inf), Parameter('theta')):
+                for state in (0, 1):
+                    with self.subTest(gate=constructor.__name__, angle=angle, control=state):
+                        circuit = QuantumCircuit(3, 1)
+                        circuit.h(0)
+                        circuit.measure(0, 0)
+                        with circuit.if_test((circuit.clbits[0], True)):
+                            circuit.append(constructor(angle, ctrl_state=state), [1, 2])
+                        result = costs(circuit)
+                        self.assertBound(result, 't-count', 0, None)
+                        self.assertIsNone(result['expected-counts']['t-count'])
+
+    def test_custom_gate_named_cp_is_not_mistaken_for_a_clifford_phase(self):
+        body = QuantumCircuit(2)
+        body.cp(Parameter('theta') / 2, 0, 1)
+        fake = body.to_gate()
+        fake.name = 'cp'
+        circuit = QuantumCircuit(2)
+        circuit.append(fake, [0, 1])
+        operation = circuit.assign_parameters({'theta': math.pi}).data[0].operation
+        self.assertIsNone(_dynamic_t_cost(operation))
+
+    def test_expected_counts_use_the_same_cost_callback_as_bounds(self):
+        circuit = QuantumCircuit(3, 1)
+        circuit.h(0)
+        circuit.measure(0, 0)
+        with circuit.if_test((circuit.clbits[0], True)):
+            circuit.cp(math.pi, 1, 2)
+        result = collect_circuit_dynamic_costs(circuit, lambda op: 7 if op.name == 'cp' else 0)
+        self.assertBound(result, 't-count', 0, 7)
+        self.assertEqual(result['expected-counts']['t-count'], {'numerator': 7, 'denominator': 2})
+
+    def test_reported_adders_have_fixed_t_costs(self):
+        for name, count in (('adder-11.qasm', 12), ('adder-31.qasm', 36)):
+            for flags in (['--json'], ['--clifford-t', '--json'], ['--clifford-t-ext', '--json'], ['--cost']):
+                with self.subTest(source=name, flags=flags):
+                    result = subprocess.run([sys.executable, str(ROOT / 'qasmviz.py'), *flags,
+                                             str(ROOT / 'tests/circuits' / name)],
+                                            text=True, capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if '--json' in flags:
+                        report = json.loads(result.stdout)
+                        self.assertBound(report, 't-count', count, count)
+                        self.assertEqual(report['expected-counts']['t-count'],
+                                         {'numerator': count, 'denominator': 1})
+                    else:
+                        self.assertIn(f'  t-count: {count}\n', result.stdout)
+                        self.assertNotIn(f't-count: {count}..unknown', result.stdout)
+                        self.assertNotIn('t-count:', result.stdout.split('Expected execution counts')[1])
 
     def test_bounds_contain_enumerated_nested_paths(self):
         circuit = parse(HEADER + '''qubit[2] q; bit a; bit b;
